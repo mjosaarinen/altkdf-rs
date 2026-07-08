@@ -39,88 +39,70 @@ SSLKEYLOGFILE=/tmp/deck.keylog cargo run -p tls-demo --bin deck-server
 SSLKEYLOGFILE=/tmp/deck.keylog cargo run -p tls-demo --bin deck-client
 ```
 
-## Status
+## Outcome
 
-**All planned stages (0–5) are complete, plus the security/realism follow-ups
-(6A resumption, 6B PSK import, 6C clean-failure, 6D zeroize), the Appendix A.1
-benchmark, the informative Appendix D FIPS-component schedule, and a `no_std`
-core crate. `make ci` and strict `cargo doc` are green.** What remains is
-optional stretch (see the end of this list). Detail:
+**The draft is fully and faithfully implementable, and interoperates over a live
+TLS 1.3 handshake.** Every normative component reproduced cleanly and nothing in
+the specification required a workaround or a judgement call to make it work:
 
-- **Core crate (`deck-schedule`) — Stages 0–3 done & validated.** Keccak-p
-  permutation, sponge, framed deck ops, MAC, the three-stage schedule, and every
-  §5 derivation. Primitives pinned to public KATs (RFC 9861 TurboSHAKE256,
-  FIPS 202 SHAKE256, SP 800-185 KMAC256, incl. multi-block); the full schedule +
-  derivations (plus the Appendix D FIPS-component schedule) are emitted as vectors
-  (`deck-schedule/vectors/*.json`, 73 records) and reproduced byte-for-byte by an
-  independent Python implementation (`deck-schedule/vectors/reproduce.py`). The
-  crate is `#![no_std]`.
-- **Stage 4 (rustls integration) — done.** Vendored rustls 0.23.41 fork
-  (aws-lc-rs backend, for pure ML-KEM key exchange); the deck `TranscriptHash` as
-  a `crypto::hash::Hash` provider; the TLS 1.3 `KeySchedule` rewritten onto the
-  deck for 1-RTT (0-RTT / ECH unsupported), cross-checked against the reference
-  for every derived secret. The five cipher suites `0xFF01..=0xFF05` are
-  registered and the deck `CryptoProvider` + TLS 1.3 configs assembled. **Two
-  forked endpoints complete a live 1-RTT handshake over ML-KEM768 and exchange
-  application data** on every deck suite (`rustls-integration/tests/loopback.rs`).
-- **Stage 5 (demo + wire verification) — done.** `deck-server` / `deck-client`
-  binaries complete a real-socket TLS 1.3 handshake on a deck suite (`0xFF01` over
-  ML-KEM768), with ALPN and `SSLKEYLOGFILE` (NSS key-log for Wireshark). The
-  `tls-demo` integration test exercises a live `KeyUpdate` (§5.4) and
-  `export_keying_material` (§5.6) and cross-checks that both peers logged
-  identical 64-octet deck secrets (`tls-demo/tests/demo.rs`).
-- **Stage 6A (PSK binder + resumption) — done.** The deck PSK binder (§5.5) is
-  implemented (its MAC binds the `"res binder"`/`"ext binder"` label, *not*
-  `"finished"` — pinned by a regression test); a full handshake issues a ticket
-  and a second **resumes** on a deck suite (`tests/resumption.rs`). The
-  `deck_server_config`/`deck_client_config` helpers now default to **1-RTT
-  resumption on, 0-RTT off**. 0-RTT stays deferred (the server skips the early
-  secret for deck suites).
-- **Stage 6B (external PSK importer, §10) — done, including a live handshake.**
-  `ImportedIdentityV2` serialization + `import()` in `deck-schedule` bind the
-  external PSK per target cipher suite into an `ipsk` (§5.9) that feeds the
-  `"ext binder"` path (§5.5); the Appendix C `psk_import` vectors carry a real
-  `ImportedIdentityV2` and are independently reproduced. rustls 0.23.41 had no
-  external-PSK configuration surface, so the fork gained one (`DeckExternalPsk`,
-  `ClientConfig.deck_external_psk` / `ServerConfig.deck_external_psks`, an external
-  offer path + server-side identity match + external-binder verify). **Two forked
-  peers now complete a 1-RTT handshake authenticated by an out-of-band external
-  PSK on a deck suite — no server Certificate** (`tests/external_psk.rs`), and a
-  wrong-`epsk` variant is rejected at the binder. External PSK + (EC)DHE is
-  structurally a 1-RTT resumption, so it reuses the resumption machinery,
-  differing only in the PSK source and the binder label (now parametrized).
-- **Stage 6C (panic → clean failure) — done.** No peer- or config-reachable deck
-  path panics: 0-RTT is declined at negotiation (a deck client offered an
-  early-data ticket resumes at 1-RTT), and the ECH acceptance confirmation (§5.8)
-  returns a clean `Error` instead of the old fail-closed panic
-  (`tests/hardening.rs`). Remaining fork panics are `unreachable!` internal
-  invariants.
-- **Stage 6D (zeroize hardening, §15.7.2.2) — done.** Live secret state zeroizes
-  on drop: the sponge state and deck accumulators (the draft's explicit call-out),
-  every squeezed secret (returned as `Secret = Zeroizing<Vec<u8>>`), and the fork's
-  `DeckState` stage secrets + record-key scratch. Wire values stay plain bytes. One
-  new dependency (`zeroize`).
-- **Invocation-count benchmark (Appendix A.1) — done.**
-  `deck-schedule/examples/invocations.rs` (`make bench`, in `make ci`) instruments
-  Keccak-f[1600] and measures one full representative handshake: **HKDF-SHA3-256 =
-  156 permutations / 39 invocations (matches the draft exactly)**; the deck
-  (stateful) = 41 / 28, a **3.80×** permutation win. (It measures 28 deck
-  invocations — the §7.3 schedule has two ratchets — vs Table 4's 29, a minor
-  draft over-count.)
-- **Appendix D (informative FIPS-component schedule) — done.** RFC 8446 §7.1 with
-  KMAC256 as the PRF throughout (Extract from SP 800-56C, Expand = SP 800-108
-  counter mode), TranscriptHash = SHAKE256(·, 64), in `deck-schedule/src/fips.rs`.
-  Emitted as `deck-schedule/vectors/fips.json` (14 records) and independently
-  reproduced. The benchmark gained a FIPS-component row — **117 perms / 39 invocations**, same
-  invocation count as HKDF-SHA3-256, still ~2.85× the deck.
-- **`no_std` — done.** The core crate is `#![no_std]` + `alloc` and builds for
-  bare-metal `thumbv7em-none-eabi` (`make no-std`, in `make ci`).
-- **Stage 6 (stretch) — remaining:** live ECH (§5.8) only. Live ECH is
-  **blocked** — rustls has no server-side ECH subsystem to verify a deck
-  acceptance confirmation against — so it stays fail-closed by design. (The live
-  external-PSK wire handshake is done; see Stage 6B above.) Note 0-RTT early data
-  (§11) is likewise not driven live — declined at negotiation, resumes at 1-RTT —
-  a deliberate non-goal, not a stretch item (Stage 6C).
+- The complete §7.3 schedule (both profiles), the §5.2 MAC, §2 framing, the §2.1
+  transcript hash (including the HelloRetryRequest synthetic message), every §5
+  derivation, the §10 external-PSK importer, and all **five** §6 cipher suites are
+  implemented, validated in layers: the **primitives** are pinned to public KATs
+  (RFC 9861 TurboSHAKE256, FIPS 202 SHAKE256, SP 800-185 KMAC256); the **schedule
+  and every derivation** are emitted as 73 test vectors and reproduced
+  byte-for-byte by a second implementation written from the draft text alone; and
+  the **live rustls tests** validate stack agreement and on-the-wire behaviour.
+- Two forked rustls endpoints complete a **live 1-RTT handshake over ML-KEM768 on
+  each of the five suites** (`tests/loopback.rs`). On a deck suite (`0xFF01`),
+  session resumption (`tests/resumption.rs`), a live `KeyUpdate` and exporter
+  (`tls-demo/tests/demo.rs`), and an out-of-band **external-PSK (§10) handshake**
+  (`tests/external_psk.rs`) also work end to end. Separately, a direct self-test
+  cross-checks **every derived secret of a no-PSK schedule on `0xFF01`**
+  byte-for-byte against the independent reference (`deck_schedule_matches_reference`).
+- The informative Appendix D (FIPS-component) schedule is also implemented,
+  vectored, and reproduced, purely for comparison.
+- The design goal holds: because the draft changes *only* the key schedule (§1.2),
+  the TLS integration was confined to a few small seams, and the ~3× permutation
+  advantage over an HKDF-SHA3 schedule is confirmed by measurement (in fact larger
+  — see finding 2).
+
+Live coverage is 1-RTT: the handshake (all five suites), resumption,
+KeyUpdate/exporter, and external PSK. **Two features are implemented/vectored but
+not driven live**, both by design rather than any draft gap:
+
+- **0-RTT early data (§11)** is *declined*, not exercised. The deck early-stage
+  leaves (`c_e_traffic`, `e_exp_master`) are implemented and vectored in the
+  reference crate, but the fork gates the live early-traffic path off: a deck
+  client never offers early data and a deck server never accepts it, so a
+  0-RTT-capable ticket simply resumes at 1-RTT (`tests/hardening.rs`). 0-RTT was
+  deferred scope for the prototype.
+- **ECH acceptance confirmation (§5.8)** *fails closed* — a limitation of the host
+  stack, not the draft: rustls has no server-side ECH subsystem at all to verify a
+  confirmation against. The deck ECH confirmation crypto is implemented and
+  vectored; the fork returns a clean error rather than a fabricated result.
+
+The findings below are therefore all editorial / accounting — a Table 4
+invocation over-count, a conservative §A.1 permutation figure, one under-specified
+informative appendix, and a labelling foot-gun worth a one-line caution. None
+affects security or interoperability.
+
+## What matched the draft exactly (positive confirmations)
+
+- **TurboSHAKE256** (12-round Keccak-p[1600,12], domain `0x1F`) matches RFC 9861
+  Appendix A.3 — empty input, multi-block `ptn(17^k)`, and the 10032-octet output.
+- **SHAKE256** (24-round) matches FIPS 202 and Python `hashlib.shake_256`.
+- **The MAC over the 24-round permutation is byte-for-byte NIST KMAC256**
+  (SP 800-185 Sample #4), confirming the §5.2 layout and the `right_encode(8L)`
+  length binding. `frame(x) = uint16(len)||x` framing is injective as §15.7.3
+  claims.
+- **HKDF-SHA3-256 baseline** for the representative handshake measures **exactly
+  156 permutations / 39 invocations**, matching §A.1 and Table 4's RFC column.
+- The whole §7.3 schedule and every §5 derivation reproduce byte-for-byte under a
+  second, independent implementation written from the draft text alone.
+- A **live 1-RTT handshake over ML-KEM768** completes on all five deck suites
+  between two forked rustls endpoints; on a deck suite, session resumption and an
+  out-of-band external-PSK (§10) handshake also complete end to end.
 
 
 ## Design in one paragraph
