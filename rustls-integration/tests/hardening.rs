@@ -1,9 +1,8 @@
-//! Stage 6C: unsupported deck features fail **cleanly**, never by panic.
+//! Unsupported deck features fail **cleanly**, never by panic.
 //!
-//! After 6A (resumption) and 6B (PSK import), the only deck features the fork
-//! does not implement are 0-RTT early data (draft §11) and the ECH acceptance
-//! confirmation (draft §5.8). This test triggers each remaining unsupported deck
-//! path and asserts no unwind:
+//! The only deck features the fork does not implement are 0-RTT early data
+//! (draft §11) and the ECH acceptance confirmation (draft §5.8). This test
+//! triggers each remaining unsupported deck path and asserts no unwind:
 //!
 //! * **0-RTT** — a deck client offered an early-data-capable ticket resumes at
 //!   1-RTT (it declines to offer early data), rather than reaching the

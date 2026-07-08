@@ -50,8 +50,7 @@
 //! (see [`vectors`]) and reproduced byte-for-byte by an independent
 //! implementation (`vectors/reproduce.py`). The rustls integration in
 //! `../rustls-integration` drives this crate for a live TLS 1.3 handshake
-//! (Stage 4, done). See `PLAN.md` at the repo root for the staged plan and which
-//! pieces are validated.
+//! (see the workspace README for the full validation summary).
 
 extern crate alloc;
 

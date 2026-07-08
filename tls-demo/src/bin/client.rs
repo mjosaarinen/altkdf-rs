@@ -1,4 +1,4 @@
-//! Deck TLS 1.3 demo **client** (draft-sullivan-tls-xof-ciphers-00, Stage 5).
+//! Deck TLS 1.3 demo **client** (draft-sullivan-tls-xof-ciphers-00).
 //!
 //! Connects to `127.0.0.1:<port>` (default 4443), completes a TLS 1.3 handshake
 //! on a deck cipher suite, sends a line and prints the echo, then prints an

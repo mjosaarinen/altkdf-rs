@@ -1,6 +1,5 @@
-//! Stage 6B (live): a TLS 1.3 handshake authenticated by an **out-of-band
-//! external PSK** on a deck cipher suite (draft §10), end to end over two forked
-//! rustls peers.
+//! Live TLS 1.3 handshake authenticated by an **out-of-band external PSK** on a
+//! deck cipher suite (draft §10), end to end over two forked rustls peers.
 //!
 //! The client imports an external PSK (`epsk` + `external_identity`) for its
 //! target deck suite into an `ipsk` (draft §5.9), offers the serialized

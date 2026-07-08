@@ -6,7 +6,7 @@
 //! `nr` of the 24 round constants, per the Keccak-p convention and [RFC 9861].
 //!
 //! Validated indirectly by the SHAKE256 KAT in [`crate::sponge`] (24 rounds);
-//! see `PLAN.md` Stage 1 for the TurboSHAKE (12-round) KAT task.
+//! the TurboSHAKE256 KATs in [`crate::sponge`] validate the 12-round path.
 
 const ROUNDS_MAX: usize = 24;
 

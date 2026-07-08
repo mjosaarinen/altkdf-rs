@@ -1,4 +1,4 @@
-//! Stage 6A: TLS 1.3 session resumption on a deck cipher suite (no 0-RTT).
+//! TLS 1.3 session resumption on a deck cipher suite (no 0-RTT).
 //!
 //! A first handshake completes fully and the server issues a NewSessionTicket
 //! (the resumption PSK is `resumption_psk(res_master, …)`, draft §5.7). A second
@@ -11,7 +11,7 @@
 //! Two tests: [`deck_session_resumption_full_then_resumed`] builds explicit
 //! tickets-on configs (documenting the knobs), and [`resumption_via_public_helpers`]
 //! uses the public `deck_server_config` / `deck_client_config` helpers, whose
-//! Stage-6A default is 1-RTT resumption on with 0-RTT off.
+//! deck default is 1-RTT resumption on with 0-RTT off.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -168,9 +168,9 @@ fn deck_session_resumption_full_then_resumed() {
 }
 
 /// The same full → resumed flow, but built with the **public deployment helpers**
-/// `deck_server_config` / `deck_client_config` (Stage 6A default: 1-RTT resumption
-/// on, 0-RTT off) rather than hand-rolled configs. Pins that the advertised
-/// helpers resume out of the box.
+/// `deck_server_config` / `deck_client_config` (1-RTT resumption on, 0-RTT off)
+/// rather than hand-rolled configs. Pins that the advertised helpers resume out
+/// of the box.
 #[test]
 fn resumption_via_public_helpers() {
     let (certs, key) = self_signed();

@@ -14,17 +14,16 @@ The draft is in [`doc/draft-sullivan-tls-xof-ciphers-00.txt`](doc/draft-sullivan
 | path | what |
 |---|---|
 | `deck-schedule/` | core crate: Keccak-p permutation, sponge, deck ops, MAC, three-stage schedule, all §5 derivations, §10 PSK import, informative Appendix D FIPS schedule. `#![no_std]` + `alloc`, one dependency (`zeroize`); KAT-validated. |
-| `rustls-integration/` | Stage 4: rustls fork wiring the deck schedule into a real TLS 1.3 stack |
-| `tls-demo/` | Stage 5: client + server binaries; live handshake + keylog verification |
+| `rustls-integration/` | rustls fork wiring the deck schedule into a real TLS 1.3 stack |
+| `tls-demo/` | client + server binaries; live handshake + keylog verification |
 | `deck-schedule/vectors/` | primitive KATs + draft Appendix C schedule vectors packaged with the core crate |
-| `PLAN.md` | **staged plan and progress tracker** |
 
 ## Quickstart
 
-See [`PLAN.md`](PLAN.md) for the staged plan and exactly what's validated vs.
-drafted, and [`FINDINGS.md`](FINDINGS.md) for consolidated notes to the draft
-author (a Table 4 invocation over-count, a conservative §A.1 permutation figure,
-and the under-specified Appendix D encoding).
+See the outcome section below for what's validated vs. drafted, and
+[`FINDINGS.md`](FINDINGS.md) for consolidated notes to the draft author (a Table
+4 invocation over-count, a conservative §A.1 permutation figure, and the
+under-specified Appendix D encoding).
 
 ```sh
 cargo test        # all crates: deck-schedule, rustls-integration, tls-demo

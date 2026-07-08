@@ -1,9 +1,9 @@
-//! Stage 4 M4: a live loopback handshake on a deck cipher suite.
+//! Live loopback handshake on a deck cipher suite.
 //!
 //! Two forked-rustls endpoints — both on the deck [`CryptoProvider`] — complete
 //! a no-PSK 1-RTT TLS 1.3 handshake over an in-memory transport and exchange
 //! application data in both directions. This is the end-to-end proof that the
-//! deck key schedule (draft §7.3) wired into rustls (Stage 4) is self-consistent:
+//! deck key schedule (draft §7.3) wired into rustls is self-consistent:
 //!
 //! * A successful **Finished** exchange proves both peers derived identical
 //!   handshake traffic secrets and the same deck `TranscriptHash` (draft §2.1,
@@ -12,7 +12,7 @@
 //!   traffic secrets and record keys (draft §5.3).
 //! * The negotiated suite is one of `0xFF01..=0xFF05`, confirming that rustls
 //!   carries and selects the private-use code points as `CipherSuite::Unknown`
-//!   (PLAN.md Stage 4 audit item).
+//!   values.
 //!
 //! The key exchange is whatever the deck provider prefers first — pure
 //! **ML-KEM768** (draft-ietf-tls-mlkem), the clean single-`Absorb("dh", …)` path

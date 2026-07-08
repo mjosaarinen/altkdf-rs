@@ -1,4 +1,4 @@
-# rustls-integration (Stage 4)
+# rustls-integration
 
 Surgical integration of the deck schedule into [rustls](https://github.com/rustls/rustls).
 The draft changes **only** the key schedule — no wire format, no state machine
@@ -19,13 +19,13 @@ to message flow" (draft Appendix B, line 2397).
   list, the fork's schedule cross-check (`deck_schedule_matches_reference`), and
   the accept-any loopback verifier (`danger`).
 
-Although titled "Stage 4", this crate carries all the later fork work too: the
-deck PSK binder + session resumption (6A), the external-PSK (§10) importer with a
-**live external-PSK handshake** (6B), the panic → clean-failure hardening (6C),
-and the `DeckState` zeroize pass (6D). Tests: `tests/loopback.rs` (live 1-RTT
-interop, every suite), `tests/resumption.rs` (full → resumed), `tests/external_psk.rs`
-(out-of-band external-PSK handshake + wrong-secret rejection), and
-`tests/hardening.rs` (0-RTT declined, ECH fails cleanly).
+This crate also carries the deck PSK binder + session resumption, the
+external-PSK (§10) importer with a **live external-PSK handshake**, clean-failure
+hardening for unsupported paths, and the `DeckState` zeroize pass. Tests:
+`tests/loopback.rs` (live 1-RTT interop, every suite), `tests/resumption.rs`
+(full → resumed), `tests/external_psk.rs` (out-of-band external-PSK handshake +
+wrong-secret rejection), and `tests/hardening.rs` (0-RTT declined, ECH fails
+cleanly).
 
 The workspace root pins `rustls = "=0.23.41"` and redirects it to the fork with
 `[patch.crates-io] rustls = { path = "rustls-integration/rustls" }`, so the fork
@@ -42,8 +42,8 @@ schedule targets — the ring provider has only X25519 / secp256r1 / secp384r1:
 - **hybrids** (`X25519MLKEM768`, `SECP256R1MLKEM768`) exist but rustls flattens
   their two component secrets into one `SharedSecret`, which conflicts with the
   deck's ordered per-component `Absorb("dh", …)` (draft §7.3). Deferred until the
-  KX seam can expose ordered components; M4 registers single-component groups
-  only (`MLKEM768`, `X25519`, `SECP256R1`).
+  KX seam can expose ordered components; this prototype registers
+  single-component groups only (`MLKEM768`, `X25519`, `SECP256R1`).
 
 Re-vendor (if ever needed): download `rustls-0.23.41.crate` from crates.io,
 extract to `rustls/`, drop `Cargo.lock` / `.cargo_vcs_info.json` /
@@ -66,17 +66,17 @@ the draft section it implements, so the full delta against upstream 0.23.41 is
 - `rustls/src/tls13/mod.rs` `can_resume_from`: deck suites require an exact
   cipher-suite match for PSK/resumption, not RFC 8446's same-hash rule (draft §4,
   §15.2). Regression test: `deck_resumption_requires_exact_suite` in `src/lib.rs`.
-- `rustls/src/tls13/key_schedule.rs` (M3): the inner `KeySchedule` is replaced by
+- `rustls/src/tls13/key_schedule.rs`: the inner `KeySchedule` is replaced by
   the deck schedule (draft §7.3) — a `DeckState` machine plus deck helpers, and
   `KeyScheduleSuite`'s leaf ops routed to `deck-schedule` (record keys §5.3,
   Finished MAC §5.5, key update §5.4, exporter §5.6, resumption PSK §5.7). Two
   outer touchpoints: `into_handshake` ratchets `main_secret` after `TH_SH`;
   `KeyScheduleBeforeFinished::new` enters the application stage with `TH_SF`.
-  The **PSK binder** (§5.5) is implemented (Stage 6A/6B) via
+  The **PSK binder** (§5.5) is implemented via
   `KeySchedule::binder_verify_data` → `deck_schedule::derive::binder_verify_data`,
   parametrized by binder label (`BinderKind::Resumption` for a resumption ticket,
   `BinderKind::External` for an imported external PSK, draft §10).
-  The unimplemented deck features fail **cleanly**, not by panic (Stage 6C): 0-RTT
+  The unimplemented deck features fail **cleanly**, not by panic: 0-RTT
   is declined at negotiation (a `DECK-FORK` `is_deck_suite` gate stops the deck
   client offering, and the deck server accepting, early data — §11), and both ECH
   acceptance confirmations (`server_ech_confirmation_secret` /
@@ -91,10 +91,10 @@ the draft section it implements, so the full delta against upstream 0.23.41 is
   root test `deck_schedule_matches_reference` (`src/lib.rs`) checks every derived
   secret — c/s handshake, c/s application, exporter, resumption master, Finished
   MAC, record key/iv — byte-for-byte against `deck_schedule::schedule::run`. So
-  the wiring is validated against the independent reference now, not only by M4
-  peer agreement.
+  the wiring is validated against the independent reference now, not only by peer
+  agreement.
 
-  **Session resumption (Stage 6A):** the deck PSK binder (§5.5) is implemented, so
+  **Session resumption:** the deck PSK binder (§5.5) is implemented, so
   resumption works — `tests/resumption.rs` drives a full handshake + ticket, then a
   resumed handshake on a deck suite (via both hand-rolled configs and the public
   helpers). `deck_server_config`/`deck_client_config` now default to **1-RTT
@@ -103,7 +103,7 @@ the draft section it implements, so the full delta against upstream 0.23.41 is
   not `"finished"` — flattening that onto the Finished path would break it, so the
   distinction is pinned by a deck-schedule regression test.
 
-  **External PSK (Stage 6B):** rustls 0.23.41 has no external-PSK config surface
+  **External PSK:** rustls 0.23.41 has no external-PSK config surface
   (its `PresharedKey` path is resumption-only), so the fork adds one — a
   `DeckExternalPsk` type (`rustls/src/deck_psk.rs`), a `ClientConfig.deck_external_psk`
   offer and a `ServerConfig.deck_external_psks` accept list, an external-PSK offer
@@ -118,11 +118,11 @@ the draft section it implements, so the full delta against upstream 0.23.41 is
   on the ServerHello; the `epsk`/`ipsk` are held in zeroizing buffers. Live end to
   end in `tests/external_psk.rs` (happy path + wrong-secret binder rejection).
 
-  **Hardening (Stage 6D — done):** live secret state is zeroized on drop
+  **Hardening:** live secret state is zeroized on drop
   (draft §15.7.2.2) — the sponge capacity, the deck accumulator (and cloned
   trunks), squeezed secrets (returned as `Zeroizing`), and the fork's `DeckState`
   stage secrets + record-key scratch; the external-PSK `epsk`/`ipsk` too. The
-  0-RTT/ECH fail-closed panics are gone as of Stage 6C — a clean rejection / error.
+  0-RTT/ECH fail-closed panics are gone — a clean rejection / error.
   The fork's own `#[cfg(test)]` key-schedule tests assert the old HKDF/RFC 8448
   values and are superseded by the cross-check above; they are not compiled in our
   workspace.
@@ -134,7 +134,7 @@ rustls's real TLS 1.3 suites are SHA256/SHA384 only. If a non-deck SHA512 suite
 is ever added to this fork, replace the sentinel with an explicit deck-suite
 marker (e.g. a field on `Tls13CipherSuite` or a code-point range check).
 
-## The seams (see PLAN.md Stage 4)
+## The Seams
 
 | rustls piece | change |
 |---|---|

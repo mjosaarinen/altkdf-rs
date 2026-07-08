@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "deck-schedule",
     "rustls-integration",
-    "tls-demo", # Stage 5: client + server demo binaries + wire verification
+    "tls-demo", # client + server demo binaries + wire verification
 ]
 # Keep the vendored rustls fork out of this workspace's file set. It carries its
 # own `[workspace]` table (its own root) and is pulled in via `[patch.crates-io]`
@@ -20,7 +20,7 @@ repository = "https://github.com/mjosaarinen/altkdf-rs"
 rust-version = "1.75"
 
 # The rustls dependency of `rustls-integration` resolves to our vendored fork
-# (Stage 4). Editing it in place is how the key-schedule seams are implemented;
+# Editing it in place is how the key-schedule seams are implemented;
 # the version there stays pinned to 0.23.41 so the `=0.23.41` requirement holds.
 [patch.crates-io]
 rustls = { path = "rustls-integration/rustls" }

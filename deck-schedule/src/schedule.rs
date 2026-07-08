@@ -104,8 +104,8 @@ pub fn early_secret(profile: &Profile, psk: &[u8]) -> Secret {
 /// Run the full schedule of draft §7.3.
 ///
 /// UNVALIDATED against the draft's own vectors (which require assigned code
-/// points, draft §14); the interop test of PLAN.md Stage 4 is the end-to-end
-/// check that both peers derive identical secrets.
+/// points, draft §14); the rustls loopback tests are the end-to-end check that
+/// both peers derive identical secrets.
 pub fn run(profile: &Profile, inp: &ScheduleInputs) -> ScheduleOutputs {
     let sl = profile.secret_len;
     let has_psk = inp.psk.is_some();

@@ -16,8 +16,8 @@
 //!
 //! Note: this crate implements the *derivation and encoding* of §10. Driving an
 //! external PSK through a live TLS handshake additionally needs external-PSK
-//! support in the TLS stack, which the vendored rustls fork does not provide
-//! (see the workspace PLAN, Stage 6B).
+//! support in the TLS stack; the vendored rustls fork adds that surface and
+//! exercises it in `rustls-integration/tests/external_psk.rs`.
 
 use alloc::vec::Vec;
 

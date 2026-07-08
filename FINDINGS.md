@@ -87,6 +87,5 @@ cipher suites, the full §7.3 schedule, every §5 derivation, the §10 importer)
 demonstrates 1-RTT handshake, resumption, KeyUpdate/exporter, and external PSK
 live over two peers; 0-RTT and ECH are implemented/vectored but not driven live
 (declined / fail-closed by scope, not a draft gap). Only editorial notes remain to
-feed back. See `PLAN.md` for exactly what is validated and how,
-`deck-schedule/vectors/reproduce.py` for the independent cross-check, and `README.md` for how to
-run it.*
+feed back. See `README.md` for the validation summary and how to run it, and
+`deck-schedule/vectors/reproduce.py` for the independent cross-check.*

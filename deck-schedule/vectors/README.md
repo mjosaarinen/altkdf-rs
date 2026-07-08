@@ -8,7 +8,7 @@ Two families:
 1. **Public primitive KATs** — RFC 9861 (TurboSHAKE256), FIPS 202 (SHAKE256),
    SP 800-185 (KMAC256). They validate the permutation, sponge, and MAC of
    `deck-schedule` independently of the draft, and live as unit tests in
-   `deck-schedule/src/{sponge,mac}.rs`. (PLAN.md Stages 1–2.)
+   `deck-schedule/src/{sponge,mac}.rs`.
 
 2. **Draft Appendix C vectors** — the full schedule trace and every §5
    derivation, under the `0xFF01..=0xFF05` placeholder code points. Because
@@ -101,6 +101,6 @@ when installed.
 make reproduce            # or, from deck-schedule/: python3 vectors/reproduce.py -v
 ```
 
-This is the Stage 3 gate (PLAN.md): the schedule wiring is confirmed by an
+This is the main spec-level cross-check: the schedule wiring is confirmed by an
 independent reimplementation over an independently-validated primitive, not just
 by the crate's own determinism.

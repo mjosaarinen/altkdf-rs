@@ -1,6 +1,6 @@
 [package]
 name = "tls-demo"
-description = "Stage 5 demo: a live TLS 1.3 handshake on a deck cipher suite (draft-sullivan-tls-xof-ciphers-00)"
+description = "Live TLS 1.3 demo handshake on a deck cipher suite (draft-sullivan-tls-xof-ciphers-00)"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -17,8 +17,8 @@ name = "deck-client"
 path = "src/bin/client.rs"
 
 [dependencies]
-# The deck CryptoProvider + config helpers (Stage 4). Re-exports `rustls` and
-# `deck_schedule`, but we also depend on `rustls` directly for ergonomic paths.
+# The deck CryptoProvider + config helpers. Re-exports `rustls` and
+# `deck_schedule`, but this crate also depends on `rustls` directly for ergonomic paths.
 rustls-integration = { path = "../rustls-integration" }
 rustls = { version = "=0.23.41", default-features = false, features = ["aws_lc_rs", "std", "logging"] }
 # Self-signed demo certs (ECDSA-P256). `aws_lc_rs` keeps the whole build on one

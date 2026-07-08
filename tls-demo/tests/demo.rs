@@ -1,6 +1,6 @@
-//! Stage 5 wire verification: a live deck TLS 1.3 handshake over a **real TCP
-//! loopback** (not the in-memory transport of the Stage 4 test), exercising ALPN,
-//! a two-way echo across a record boundary, a live KeyUpdate (draft §5.4), the
+//! Wire verification: a live deck TLS 1.3 handshake over a **real TCP loopback**
+//! (not the in-memory transport used by `rustls-integration`), exercising ALPN, a
+//! two-way echo across a record boundary, a live KeyUpdate (draft §5.4), the
 //! exporter (draft §5.6), and a key-log cross-check that both peers derived
 //! identical deck secrets (draft §2.1, §5.3, §7.3).
 
@@ -17,7 +17,7 @@ use tls_demo::{
 
 const MSG1: &[u8] = b"deck-demo round 1: hello over a real socket";
 const EXP_LABEL: &[u8] = b"EXPERIMENTAL deck-demo exporter";
-const EXP_CONTEXT: &[u8] = b"stage-5 context";
+const EXP_CONTEXT: &[u8] = b"deck-demo context";
 
 /// Round-2 payload length: larger than one 16 KB TLS record, so it crosses a
 /// record boundary. The payload is sent *after* a KeyUpdate.

@@ -1,4 +1,4 @@
-# tls-demo (Stage 5)
+# tls-demo
 
 A client and server binary that complete a real TLS 1.3 handshake negotiating
 one of this document's cipher suites (`0xFF01..=0xFF05`), driven by the
@@ -49,5 +49,6 @@ asserts:
 
 If a deck-schedule client and server complete the handshake and exchange
 application data, both peers independently derived identical traffic secrets from
-the deck schedule — the end-to-end self-consistency proof (PLAN.md Stage 4/5).
-Byte-for-byte spec correctness is Stage 3's independent vector reproduction.
+the deck schedule — the end-to-end self-consistency proof. Byte-for-byte spec
+correctness comes from `deck-schedule/vectors/reproduce.py`, the independent
+vector reproduction.

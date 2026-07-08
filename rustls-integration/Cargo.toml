@@ -9,8 +9,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# The dependency-free reference schedule (Stages 1–3). The rustls seams call
-# into this crate for every key-schedule computation.
+# The dependency-free reference schedule. The rustls seams call into this crate
+# for every key-schedule computation.
 deck-schedule = { path = "../deck-schedule" }
 
 # rustls 0.23.41 with the aws-lc-rs backend. The source is our vendored fork
@@ -23,7 +23,7 @@ deck-schedule = { path = "../deck-schedule" }
 rustls = { version = "=0.23.41", default-features = false, features = ["aws_lc_rs", "std", "logging"] }
 
 [dev-dependencies]
-# Loopback interop test (Stage 4 M4): self-signed certs + in-memory transport.
+# Loopback interop test: self-signed certs + in-memory transport.
 # `default-features = false` + `aws_lc_rs` keeps rcgen from pulling ring back in
 # (its default feature set uses ring), so the whole build stays on one backend.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs"] }

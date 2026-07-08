@@ -226,8 +226,8 @@ mod tests {
     use rustls::{CipherSuite, Tls13CipherSuite};
 
     /// The vendored rustls fork builds with the aws-lc-rs backend and exposes a
-    /// provider (Stage 4 M1 baseline), including pure ML-KEM key exchange. Also
-    /// confirms the deck crate is reachable.
+    /// provider, including pure ML-KEM key exchange. Also confirms the deck crate
+    /// is reachable.
     #[test]
     fn aws_lc_rs_backed_rustls_links() {
         let provider = super::aws_lc_rs_provider();

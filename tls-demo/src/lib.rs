@@ -1,4 +1,4 @@
-//! # tls-demo (Stage 5)
+//! # tls-demo
 //!
 //! A live TLS 1.3 handshake on a deck cipher suite (draft §6), driven by the
 //! [`rustls_integration`] fork. This library holds the pieces the `deck-server`

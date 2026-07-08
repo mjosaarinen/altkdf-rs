@@ -5,7 +5,7 @@
 //!  1. **Public primitive KATs** (RFC 9861 TurboSHAKE, FIPS 202 SHAKE256,
 //!     SP 800-185 KMAC256) — validate the permutation, sponge, and MAC without
 //!     needing the draft's own vectors. These live in the unit tests of
-//!     `src/sponge.rs` and `src/mac.rs` (PLAN.md Stages 1–2).
+//!     `src/sponge.rs` and `src/mac.rs`.
 //!
 //!  2. **Draft Appendix C vectors** — the full schedule trace and every §5
 //!     derivation. Because every derived output binds the governing cipher
@@ -21,7 +21,7 @@
 //! *correctness* comes from the primitive KATs (family 1) plus the independent
 //! reproduction, not from this self-consistency check.
 //!
-//! See `PLAN.md` Stages 1–3.
+//! The independent cross-check lives in `vectors/reproduce.py`.
 
 use std::path::PathBuf;
 
