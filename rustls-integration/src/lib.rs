@@ -197,9 +197,9 @@ pub mod danger {
     }
 }
 
-/// The raw aws-lc-rs default provider. Smoke check for M1 only: its `kx_groups`
-/// include the `X25519MLKEM768` **hybrid** and omit pure `MLKEM768`, so M4 must
-/// override `kx_groups` with [`deck_kx_groups`] rather than use this as its base.
+/// The raw aws-lc-rs default provider, exposed as a smoke check: its `kx_groups`
+/// include the `X25519MLKEM768` **hybrid** and omit pure `MLKEM768`, so the deck
+/// provider overrides `kx_groups` with [`deck_kx_groups`] rather than use this as its base.
 #[doc(hidden)]
 pub fn aws_lc_rs_provider() -> rustls::crypto::CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
@@ -238,7 +238,7 @@ mod tests {
         // Pure ML-KEM is available as a standalone kx group for the deck's
         // single-component key exchange (draft-ietf-tls-mlkem). It is not in the
         // default provider's groups — the default offers only the X25519MLKEM768
-        // hybrid — so M4 assembles a custom provider that includes it.
+        // hybrid — so the deck provider assembles a custom provider that includes it.
         assert_eq!(
             rustls::crypto::aws_lc_rs::kx_group::MLKEM768.name(),
             rustls::NamedGroup::MLKEM768,
@@ -325,7 +325,7 @@ mod tests {
     /// The forked rustls `KeySchedule`, driven through the no-PSK 1-RTT order its
     /// typestates use, derives exactly the secrets that `deck-schedule`'s one-shot
     /// `schedule::run` produces for the same inputs (draft §7.3). This validates
-    /// the M3 wiring — the stage-boundary ordering (TH_SH → main ratchet, TH_SF
+    /// the fork's wiring — the stage-boundary ordering (TH_SH → main ratchet, TH_SF
     /// retained, TH_CF at res master) — against the independent deck reference,
     /// not merely by peer agreement. Also checks the Finished MAC and record-key
     /// leaf ops route to the matching deck derivations (§5.3, §5.5).

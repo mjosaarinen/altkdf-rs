@@ -221,8 +221,8 @@ fn loopback_each_deck_suite() {
     }
 }
 
-/// The deployment helpers default to **1-RTT resumption on, 0-RTT off** (Stage
-/// 6A). Field-level policy check plus a behavioral one: a live handshake through
+/// The deployment helpers default to **1-RTT resumption on, 0-RTT off**.
+/// Field-level policy check plus a behavioral one: a live handshake through
 /// the helpers issues a NewSessionTicket. The full offer-and-resume flow is
 /// covered end-to-end in `tests/resumption.rs`.
 #[test]

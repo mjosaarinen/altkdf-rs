@@ -827,7 +827,7 @@ impl KeySchedule {
 
     /// Absorb one (EC)DHE component into the handshake stage (draft §7.3), in
     /// group order. This fork offers only single-secret (non-hybrid) groups, so
-    /// exactly one component is absorbed; hybrid ordering is out of M3 scope.
+    /// exactly one component is absorbed; hybrid ordering is out of scope.
     fn input_secret(&mut self, secret: &[u8]) {
         match &mut self.state {
             DeckState::Early { early_secret } => {
