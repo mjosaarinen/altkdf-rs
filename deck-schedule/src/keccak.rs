@@ -47,15 +47,14 @@ const RHO: [u32; 25] = [
     18, 2, 61, 56, 14,
 ];
 
-/// Apply Keccak-p\[1600, `rounds`\] in place to a 25-lane state (little-endian
-/// lanes). `rounds` must be `<= 24`.
 /// Keccak-p\[1600\] permutation-call counter for the Appendix A.1 benchmark
 /// (`examples/invocations.rs`). Gated behind the `bench` feature so it is
 /// entirely absent — no counter, no branch — from normal builds.
 ///
-/// A process-wide [`AtomicU64`] (not a thread-local): the crate is `#![no_std]`,
-/// so `thread_local!` is unavailable, and the benchmark is single-threaded and
-/// sequential (`reset()` then measure), so a global counter is exact.
+/// A process-wide [`AtomicU64`](core::sync::atomic::AtomicU64) (not a
+/// thread-local): the crate is `#![no_std]`, so `thread_local!` is unavailable,
+/// and the benchmark is single-threaded and sequential (`reset()` then measure),
+/// so a global counter is exact.
 #[cfg(feature = "bench")]
 pub mod count {
     use core::sync::atomic::{AtomicU64, Ordering};

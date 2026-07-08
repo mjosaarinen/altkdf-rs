@@ -11,7 +11,7 @@ CLIPPY_ARGS  := --all-targets --all-features -- -D warnings
 NOSTD_TARGET ?= thumbv7em-none-eabi
 
 .DEFAULT_GOAL := help
-.PHONY: all build release test fmt fmt-check lint check ci doc vectors reproduce bench no-std clean distclean help
+.PHONY: all build release test fmt fmt-check lint check ci doc doc-check vectors reproduce bench no-std clean distclean help
 
 all: build ## Build the workspace (debug)
 
@@ -39,6 +39,10 @@ check: ## Fast type-check
 doc: ## Build API docs (this workspace only)
 	$(CARGO) doc --no-deps
 
+doc-check: ## Strict rustdoc (warnings-as-errors), incl. deck-schedule --all-features
+	RUSTDOCFLAGS='-D warnings' $(CARGO) doc --no-deps
+	RUSTDOCFLAGS='-D warnings' $(CARGO) doc -p deck-schedule --no-deps --all-features
+
 vectors: ## Regenerate deck-schedule/vectors/*.json (Appendix C deck + Appendix D FIPS)
 	$(CARGO) run $(CARGO_FLAGS) -p deck-schedule --example gen_vectors
 
@@ -52,7 +56,7 @@ no-std: ## Build deck-schedule as no_std for a bare-metal target (regression gua
 	@rustup target add $(NOSTD_TARGET) >/dev/null 2>&1 || true
 	$(CARGO) build -p deck-schedule --lib --target $(NOSTD_TARGET)
 
-ci: fmt-check lint test reproduce bench no-std ## Full local gate: fmt-check + lint + test + reproduction + benchmark + no_std
+ci: fmt-check lint test reproduce bench no-std doc-check ## Full local gate: fmt-check + lint + test + reproduction + benchmark + no_std + strict docs
 
 clean: ## cargo clean + remove demo capture artifacts
 	$(CARGO) clean

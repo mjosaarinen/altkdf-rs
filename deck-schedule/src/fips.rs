@@ -149,6 +149,16 @@ fn hkdf_label(length: usize, label: &[u8], context: &[u8]) -> Vec<u8> {
         full_label.len() <= 255,
         "HkdfLabel label exceeds 255 octets (RFC 8446 §7.1)"
     );
+    // RFC 8446 `opaque label<7..255>` has a lower bound too: the "tls13 " prefix
+    // is 6 octets, so a non-empty `label` is required. Enforce it, or a public
+    // `expand_label(secret, b"", ..)` would serialize a 6-octet label — outside
+    // the HkdfLabel structure this module claims to preserve verbatim.
+    assert!(
+        full_label.len() >= 7,
+        "HkdfLabel label is {} octets, below the 7-octet minimum \
+         (RFC 8446 §7.1 opaque label<7..255>: `label` must be non-empty)",
+        full_label.len()
+    );
     assert!(
         context.len() <= 255,
         "HkdfLabel context exceeds 255 octets (RFC 8446 §7.1)"
@@ -185,7 +195,8 @@ pub fn derive_secret(secret: &[u8], label: &[u8], messages: &[u8]) -> Secret {
 pub struct FipsInputs<'a> {
     /// PSK, or `None` for a full (non-PSK) handshake (RFC 8446: PSK = 0 then).
     pub psk: Option<&'a [u8]>,
-    /// The concatenated `(EC)DHE` shared secret; empty for PSK-only.
+    /// The concatenated `(EC)DHE` shared secret; empty for PSK-only (substituted
+    /// with the `HLEN` zero string in [`run`], per RFC 8446 §7.1).
     pub dhe: &'a [u8],
     /// `TranscriptHash(ClientHello)` — early-stage context.
     pub th_ch: &'a [u8],
@@ -233,9 +244,13 @@ pub fn run(inp: &FipsInputs) -> FipsOutputs {
         (None, None)
     };
 
-    // Handshake = Extract(Derive-Secret(early, "derived", ""), (EC)DHE).
+    // Handshake = Extract(Derive-Secret(early, "derived", ""), (EC)DHE). An
+    // absent (EC)DHE (PSK-only) is the HLEN zero string, exactly like the absent
+    // PSK above — RFC 8446 §7.1: "If a given secret is not available, then the
+    // 0-value consisting of a string of Hash.length bytes set to zeros is used."
     let derived_early = derive_secret(&early_secret, b"derived", b"");
-    let handshake_secret = extract(&derived_early, inp.dhe);
+    let dhe_ikm: &[u8] = if inp.dhe.is_empty() { &zero } else { inp.dhe };
+    let handshake_secret = extract(&derived_early, dhe_ikm);
     let c_hs_traffic = expand_label(&handshake_secret, b"c hs traffic", inp.th_sh, HLEN);
     let s_hs_traffic = expand_label(&handshake_secret, b"s hs traffic", inp.th_sh, HLEN);
 
@@ -436,6 +451,13 @@ mod tests {
     #[should_panic(expected = "context exceeds 255")]
     fn hkdf_label_rejects_context_over_255() {
         let _ = expand_label(&[0u8; 64], b"x", &[0u8; 256], 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "below the 7-octet minimum")]
+    fn hkdf_label_rejects_empty_label() {
+        // "tls13 " alone is 6 octets — below RFC 8446 opaque label<7..255>.
+        let _ = expand_label(&[0u8; 64], b"", b"", 64);
     }
 
     #[test]

@@ -369,7 +369,10 @@ def fips_schedule(psk, dhe, th_ch, th_sh, th_sf, th_cf):
     else:
         out["c_e_traffic"] = None
         out["e_exp_master"] = None
-    handshake = fips_extract(fips_derive_secret(early, b"derived", b""), dhe)
+    # Absent (EC)DHE (PSK-only) is the HLEN zero string, like the absent PSK
+    # above (RFC 8446 §7.1) — mirrors deck_schedule::fips::run.
+    dhe_ikm = dhe if dhe else zero
+    handshake = fips_extract(fips_derive_secret(early, b"derived", b""), dhe_ikm)
     out["handshake_secret"] = handshake
     out["c_hs_traffic"] = fips_expand_label(handshake, b"c hs traffic", th_sh, FIPS_HLEN)
     out["s_hs_traffic"] = fips_expand_label(handshake, b"s hs traffic", th_sh, FIPS_HLEN)
