@@ -1,7 +1,7 @@
 //! Unsupported deck features fail **cleanly**, never by panic.
 //!
 //! The only deck features the fork does not implement are 0-RTT early data
-//! (draft §11) and the ECH acceptance confirmation (draft §5.8). This test
+//! (draft `[zero-rtt]`) and the ECH acceptance confirmation (draft `[ech-generic]`). This test
 //! triggers each remaining unsupported deck path and asserts no unwind:
 //!
 //! * **0-RTT** — a deck client offered an early-data-capable ticket resumes at
@@ -66,7 +66,7 @@ fn exchange(client: &mut ClientConnection, server: &mut ServerConnection, msg: &
     assert_eq!(got, msg);
 }
 
-/// ECH acceptance confirmation (draft §5.8) is unimplemented for deck suites and
+/// ECH acceptance confirmation (draft `[ech-generic]`) is unimplemented for deck suites and
 /// **fails cleanly**: both the non-HRR (typestate method) and HRR (free function)
 /// paths return an `Error`, not a panic. The hook exercises both and returns true
 /// only if neither unwound.
@@ -77,12 +77,12 @@ fn deck_ech_confirmations_fail_with_error_not_panic() {
         .expect("deck suite is TLS 1.3");
     assert!(
         deck_ech_confirmations_fail_cleanly(suite),
-        "both deck ECH acceptance-confirmation paths (draft §5.8) must return an Error, not panic",
+        "both deck ECH acceptance-confirmation paths (draft [ech-generic]) must return an Error, not panic",
     );
 }
 
 /// A deck client offered an early-data-capable ticket **declines 0-RTT** and
-/// resumes at 1-RTT (draft §11), instead of reaching the unimplemented deck
+/// resumes at 1-RTT (draft `[zero-rtt]`), instead of reaching the unimplemented deck
 /// early-traffic secret. Before the gate, the second handshake would have
 /// panicked; the assertion here is that it completes as an ordinary resumption.
 #[test]
@@ -130,7 +130,7 @@ fn deck_client_declines_0rtt_and_resumes_at_1rtt() {
     );
     assert!(
         !c2.is_early_data_accepted(),
-        "a deck suite never negotiates 0-RTT (draft §11)",
+        "a deck suite never negotiates 0-RTT (draft [zero-rtt])",
     );
 
     exchange(&mut c2, &mut s2, b"1-RTT resume, no 0-RTT");

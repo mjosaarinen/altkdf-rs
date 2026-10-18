@@ -1,9 +1,9 @@
-//! Deck TLS 1.3 demo **server** (draft-sullivan-tls-xof-ciphers-00).
+//! Deck TLS 1.3 demo **server** (draft-sullivan-tls-xof-schedule).
 //!
 //! Listens on `127.0.0.1:<port>` (default 4443), completes a TLS 1.3 handshake
-//! on a deck cipher suite (`0xFF01..=0xFF05`), and echoes one line per
-//! connection. Honors `SSLKEYLOGFILE` (NSS key-log format), so a captured
-//! session can be decrypted in Wireshark.
+//! with an independently negotiated XOF KDF, and echoes one line per
+//! connection. Honors `SSLKEYLOGFILE` (NSS key-log format). Capture decryption
+//! needs tooling that implements this experimental XOF schedule.
 //!
 //! Usage: `SSLKEYLOGFILE=keys.log cargo run -p tls-demo --bin deck-server -- [port]`
 
@@ -73,6 +73,11 @@ fn report(conn: &ServerConnection) {
     if let Some(cs) = conn.negotiated_cipher_suite() {
         println!("  suite: {:#06x}", u16::from(cs.suite()));
     }
+    println!(
+        "  kdf: {:?}",
+        conn.negotiated_schedule_profile()
+            .map(|k| format!("{k:#06x}"))
+    );
     if let Some(g) = conn.negotiated_key_exchange_group() {
         println!("  group: {:?}", g.name());
     }

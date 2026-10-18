@@ -58,9 +58,8 @@ struct ExpectServerHello {
     //
     // If this is `None` then we do not support early data.
     early_data_key_schedule: Option<KeyScheduleEarly>,
-    // DECK-FORK (draft §10, §4/§15.2): if we offered an out-of-band external PSK,
-    // the deck suite it was imported for. The server MUST select that exact suite
-    // to accept the PSK (the exact-suite rule); enforced in `handle_server_hello`.
+    // DECK-FORK ([governing-profile]): the imported PSK binds this suite's KDF,
+    // but the server may select another AEAD using that KDF.
     deck_external_psk_suite: Option<&'static Tls13CipherSuite>,
     offered_key_share: Option<Box<dyn ActiveKeyExchange>>,
     suite: Option<SupportedCipherSuite>,
@@ -81,6 +80,8 @@ pub(super) struct ClientHelloInput {
     pub(super) session_id: SessionId,
     pub(super) server_name: ServerName<'static>,
     pub(super) prev_ech_ext: Option<EncryptedClientHello>,
+    // DECK-FORK: CH2 may retain or remove CH1's PSK, never import a new identity.
+    deck_external_psk_suite: Option<&'static Tls13CipherSuite>,
 }
 
 impl ClientHelloInput {
@@ -139,6 +140,7 @@ impl ClientHelloInput {
             session_id,
             server_name,
             prev_ech_ext: None,
+            deck_external_psk_suite: None,
             config,
         })
     }
@@ -237,6 +239,15 @@ fn emit_client_hello_for_retry(
         protocols: extra_exts.protocols.clone(),
         ..Default::default()
     });
+
+    // DECK-FORK: KDF offer is independent of the AEAD list.
+    let profiles=crate::schedule_profile::profiles(&config.provider);
+    if supported_versions.tls13 && !profiles.is_empty() && !cx.common.is_quic() {
+        exts.schedule_profiles=Some(crate::msgs::handshake::ScheduleProfileList(profiles));
+    }
+    if ech_state.is_some() && exts.schedule_profiles.is_some() {
+        return Err(Error::General("XOF schedule with ECH is not supported by this prototype".into()));
+    }
 
     match extra_exts.transport_parameters.clone() {
         Some(TransportParameters::Quic(v)) => exts.transport_parameters = Some(v),
@@ -359,13 +370,17 @@ fn emit_client_hello_for_retry(
     // Do we have a SessionID or ticket cached for this host?
     let tls13_session = prepare_resumption(&input.resuming, &mut exts, suite, cx, config);
 
-    // DECK-FORK (draft §10): if not resuming, offer a configured external PSK.
+    // DECK-FORK ([psk-importer]): after HRR only reuse an identity offered in CH1.
     let deck_external_psk = match tls13_session {
         Some(_) => None,
-        None => prepare_deck_external_psk(config, &mut exts, cx),
+        None => prepare_deck_external_psk(
+            config,
+            &mut exts,
+            suite,
+            &mut input.deck_external_psk_suite,
+        ),
     };
-    // The deck suite the external PSK is bound to (draft §4/§15.2): the server must
-    // select exactly this suite to accept the PSK, checked in `handle_server_hello`.
+    // The offered PSK's KDF, not its AEAD, constrains the server's selection.
     let deck_external_psk_suite = deck_external_psk.as_ref().map(|(suite, _)| *suite);
 
     // Extensions MAY be randomized
@@ -381,6 +396,9 @@ fn emit_client_hello_for_retry(
             false => None,
         })
         .collect();
+
+    let mut seen=Vec::new();
+    cipher_suites.retain(|cp| { if seen.contains(cp) { false } else { seen.push(*cp); true } });
 
     if supported_versions.tls12 {
         // We don't do renegotiation at all, in fact.
@@ -450,7 +468,7 @@ fn emit_client_hello_for_retry(
             .map(|schedule| (tls13_session.suite(), schedule)),
 
         // When we're not doing ECH and resuming, then the PSK binder need to be filled in as
-        // normal, using the resumption PSK and the "res binder" label (draft §5.5).
+        // normal, using the resumption PSK and the "res binder" label (draft [finished-and-binder-mac]).
         (_, Some(tls13_session), _) => Some((
             tls13_session.suite(),
             tls13::fill_in_psk_binder(
@@ -462,14 +480,13 @@ fn emit_client_hello_for_retry(
             ),
         )),
 
-        // DECK-FORK (draft §10): offering an external PSK — fill in the "ext binder"
-        // (draft §5.5) from the imported `ipsk` for its target deck suite.
+        // DECK-FORK ([finished-and-binder-mac]): imported PSKs use the ibk label.
         (_, None, Some((ext_suite, ext_ipsk))) => Some((
             ext_suite,
             tls13::fill_in_psk_binder(
                 ext_suite,
                 &ext_ipsk,
-                DeckBinderKind::External,
+                DeckBinderKind::Imported,
                 &transcript_buffer,
                 &mut chp,
             ),
@@ -613,6 +630,9 @@ fn prepare_resumption<'a>(
         None => None,
     };
 
+    if !config.provider.cipher_suites.iter().filter_map(|s|s.tls13()).any(|s|s.can_resume_from(tls13.suite()).is_some()) {
+        return None;
+    }
     // If the selected cipher suite can't select from the session's, we can't resume.
     if let Some(suite) = suite {
         suite.can_resume_from(tls13.suite())?;
@@ -622,36 +642,44 @@ fn prepare_resumption<'a>(
     Some(tls13)
 }
 
-/// DECK-FORK (draft §10): offer a configured out-of-band external PSK when we are
-/// not resuming. Imports the PSK for the first offered deck TLS 1.3 suite
-/// (draft §5.9), sets the `pre_shared_key` extension with that suite's serialized
-/// `ImportedIdentityV2` as the identity plus a placeholder binder (filled in by
+/// DECK-FORK (draft `[psk-importer]`): offer a configured out-of-band external PSK when we are
+/// not resuming. Initially imports for the first offered XOF KDF
+/// (draft `[import-derivation]`), sets the `pre_shared_key` extension with its serialized
+/// `ImportedIdentity` as the identity plus a placeholder binder (filled in by
 /// `fill_in_psk_binder`, exactly like resumption), and returns `(suite, ipsk)` so
-/// the caller can compute the `"ext binder"` (draft §5.5) and retain the early key
+/// the caller can compute the `"ibk"` (draft `[finished-and-binder-mac]`) and retain the early key
 /// schedule. Returns `None` if no external PSK is configured, TLS 1.3 is not
-/// offered, or the provider offers no deck suite. The client always offers
+/// offered, or the original identity is incompatible with HRR. CH2 must not
+/// introduce a new PSK (RFC 8446 Section 4.1.2). The client always offers
 /// `psk_key_exchange_modes` (psk_dhe) in TLS 1.3, so no extra extension is needed
-/// (RFC 8446 §4.2.9).
+/// (RFC 8446 Section 4.2.9).
 fn prepare_deck_external_psk(
     config: &ClientConfig,
     exts: &mut ClientExtensions<'_>,
-    cx: &mut ClientContext<'_>,
+    retry_suite: Option<SupportedCipherSuite>,
+    offered_suite: &mut Option<&'static Tls13CipherSuite>,
 ) -> Option<(&'static Tls13CipherSuite, Zeroizing<Vec<u8>>)> {
     let epsk = config.deck_external_psk.as_ref()?;
-    if !config.supports_version(ProtocolVersion::TLSv1_3) {
+    // No XOF PSK without an actual KDF offer, including when using QUIC.
+    let profiles = &exts.schedule_profiles.as_ref()?.0;
+    let suite = if let Some(selected) = retry_suite {
+        let original = (*offered_suite)?;
+        selected.tls13()?.can_resume_from(original)?;
+        original
+    } else {
+        config
+            .provider
+            .cipher_suites
+            .iter()
+            .filter_map(|cs| cs.tls13())
+            .find(|s| is_deck_suite(s))?
+    };
+    let kdf = suite.common.hash_provider.schedule_profile()?;
+    if !profiles.contains(&kdf) {
         return None;
     }
-    // Bind the PSK to the first deck suite the provider lists (draft §10 binds one
-    // target cipher suite; the server accepts only if it selects the same suite,
-    // the exact-suite rule of §4/§15.2 — the identity encodes target_ciphersuite).
-    let suite = config
-        .provider
-        .cipher_suites
-        .iter()
-        .filter_map(|cs| cs.tls13())
-        .find(|s| is_deck_suite(s))?;
-    let (identity, ipsk) = epsk.import_for(u16::from(suite.common.suite))?;
-    cx.common.suite = Some(suite.into());
+    let (identity, ipsk) = epsk.import_for(kdf)?;
+    *offered_suite = Some(suite);
 
     // External PSKs carry no ticket age (obfuscated_ticket_age = 0, RFC 8446
     // §4.2.11.1). The placeholder binder's length must match the real one.
@@ -836,14 +864,25 @@ impl State<ClientConnectionData> for ExpectServerHello {
             }
         }
 
-        let suite = config
-            .find_cipher_suite(server_hello.cipher_suite)
-            .ok_or_else(|| {
-                cx.common.send_fatal_alert(
-                    AlertDescription::HandshakeFailure,
-                    PeerMisbehaved::SelectedUnofferedCipherSuite,
-                )
-            })?;
+        // DECK-FORK ([cipher-suites]): HRR pinning takes precedence over local
+        // fallback policy, including when SH removes a required profile.
+        if let Some(previous) = self.suite {
+            if previous.suite() != server_hello.cipher_suite
+                || previous.hash_provider().schedule_profile() != server_hello.schedule_profile
+            {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedDifferentCipherSuiteAfterRetry,
+                ));
+            }
+        }
+        let suite = crate::schedule_profile::choose_client(
+            &config.provider,
+            server_hello.cipher_suite,
+            server_hello.schedule_profile,
+            self.input.hello.sent_extensions.contains(&ExtensionType::ScheduleProfile),
+            cx.common,
+        )?;
 
         if version != suite.version().version {
             return Err({
@@ -854,21 +893,9 @@ impl State<ClientConnectionData> for ExpectServerHello {
             });
         }
 
-        match self.suite {
-            Some(prev_suite) if prev_suite != suite => {
-                return Err({
-                    cx.common.send_fatal_alert(
-                        AlertDescription::IllegalParameter,
-                        PeerMisbehaved::SelectedDifferentCipherSuiteAfterRetry,
-                    )
-                });
-            }
-            _ => {
-                debug!("Using ciphersuite {suite:?}");
-                self.suite = Some(suite);
-                cx.common.suite = Some(suite);
-            }
-        }
+        debug!("Using ciphersuite {suite:?}");
+        self.suite = Some(suite);
+        cx.common.suite = Some(suite);
 
         // Start our handshake hash, and input the server-hello.
         let mut transcript = self
@@ -1015,14 +1042,13 @@ impl ExpectServerHelloOrHelloRetryRequest {
         }
 
         // Or asks us to use a ciphersuite we didn't offer.
-        let Some(cs) = config.find_cipher_suite(hrr.cipher_suite) else {
-            return Err({
-                cx.common.send_fatal_alert(
-                    AlertDescription::IllegalParameter,
-                    PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedCipherSuite,
-                )
-            });
-        };
+        let cs = crate::schedule_profile::choose_client(
+            &config.provider,
+            hrr.cipher_suite,
+            hrr.schedule_profile,
+            self.next.input.hello.sent_extensions.contains(&ExtensionType::ScheduleProfile),
+            cx.common,
+        )?;
 
         // Or offers ECH related extensions when we didn't offer ECH.
         if cx.data.ech_status == EchStatus::NotOffered && hrr.encrypted_client_hello.is_some() {

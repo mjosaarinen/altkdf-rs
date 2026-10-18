@@ -19,6 +19,10 @@ pub trait Hash: Send + Sync {
     /// Which hash function this is, eg, `HashAlgorithm::SHA256`.
     fn algorithm(&self) -> HashAlgorithm;
 
+    /// DECK-FORK ([cipher-suites]): negotiated XOF KDF for an internal virtual
+    /// suite. Ordinary suites retain HKDF and return None.
+    fn schedule_profile(&self) -> Option<u16> { None }
+
     /// Return `true` if this is backed by a FIPS-approved implementation.
     fn fips(&self) -> bool {
         false

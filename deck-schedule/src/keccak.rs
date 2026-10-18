@@ -1,4 +1,4 @@
-//! Keccak-p\[1600, nr\] permutation (draft §8.1, §9.1).
+//! Keccak-p\[1600, nr\] permutation (draft [turboshake-profile], [shake-profile]).
 //!
 //! `nr = 12` is the permutation of TurboSHAKE256 (Keccak-p\[1600,12\], used by
 //! the `TLS13-TURBOSHAKE256` profile); `nr = 24` is Keccak-f\[1600\] (used by
@@ -76,7 +76,7 @@ pub mod count {
     }
 }
 
-/// Apply Keccak-p\[1600, `rounds`\] to `state` in place (draft §8.1, §9.1).
+/// Apply Keccak-p\[1600, `rounds`\] to `state` in place (draft [turboshake-profile], [shake-profile]).
 /// `rounds` is 12 for TurboSHAKE256 or 24 for SHAKE256 (Keccak-f\[1600\]); a
 /// reduced-round instance uses the *last* `rounds` of the 24 round constants.
 pub fn keccak_p(state: &mut [u64; 25], rounds: usize) {

@@ -1,16 +1,6 @@
-//! # tls-demo
-//!
-//! A live TLS 1.3 handshake on a deck cipher suite (draft §6), driven by the
-//! [`rustls_integration`] fork. This library holds the pieces the `deck-server`
-//! / `deck-client` binaries and the loopback integration test share: demo config
-//! builders and a [`CapturingKeyLog`] that records the NSS-format key-log lines
-//! rustls emits, so a test can cross-check that both peers logged **identical**
-//! deck secrets (draft §2.1, §5.3, §7.3) without a packet capture.
-//!
-//! The binaries additionally honor `SSLKEYLOGFILE` (via [`rustls::KeyLogFile`]),
-//! so a real run can be decrypted in Wireshark. Certificate authentication uses
-//! an accept-any verifier ([`rustls_integration::danger`]) that still performs
-//! the real signature check — PKI is out of the draft's scope (draft §15.5).
+//! TCP demonstration helpers for independently negotiated TLS XOF schedules.
+//! The key log supports peer-secret comparison. The certificate verifier skips
+//! chain validation but verifies the real CertificateVerify signature.
 
 use std::sync::{Arc, Mutex};
 
@@ -24,7 +14,7 @@ pub const DEMO_ALPN: &[u8] = b"deck-demo";
 
 /// One NSS-format key-log line: `label`, the connection's `client_random`, and
 /// the logged `secret` (deck traffic/exporter secrets are 64 octets — SecretLen,
-/// draft §8, §9).
+/// draft `[turboshake-profile]`, `[shake-profile]`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyLogLine {
     pub label: String,

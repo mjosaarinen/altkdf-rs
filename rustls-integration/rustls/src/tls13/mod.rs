@@ -38,24 +38,15 @@ pub struct Tls13CipherSuite {
 impl Tls13CipherSuite {
     /// Can a session using suite self resume from suite prev?
     pub fn can_resume_from(&self, prev: &'static Self) -> Option<&'static Self> {
-        // DECK-FORK (draft-sullivan-tls-xof-ciphers §4, §15.2): a deck suite
-        // requires an EXACT cipher-suite match for PSK/resumption compatibility,
-        // stricter than RFC 8446's "same transcript hash" rule. Without this, the
-        // three same-profile deck suites — and both profiles, which share the
-        // 64-octet TranscriptHash tag — would alias as mutually resumable, letting
-        // a PSK established under one deck suite key another's early stage.
-        //
-        // Deck suites are identified by their TranscriptHash tag `SHA512`, which
-        // no real TLS 1.3 suite uses (those are SHA256/SHA384); for any such suite
-        // on either side we demand exact-suite equality. All other suites keep the
-        // RFC 8446 same-hash rule unchanged.
-        let self_alg = self.common.hash_provider.algorithm();
-        let prev_alg = prev.common.hash_provider.algorithm();
-        let deck = self_alg == hash::HashAlgorithm::SHA512 || prev_alg == hash::HashAlgorithm::SHA512;
-        if deck {
-            return (prev.common.suite == self.common.suite).then_some(prev);
+        let ours = self.common.hash_provider.schedule_profile();
+        let theirs = prev.common.hash_provider.schedule_profile();
+        match (ours, theirs) {
+            (Some(a), Some(b)) => (a == b).then_some(prev),
+            (None, None) => (self.common.hash_provider.algorithm()
+                == prev.common.hash_provider.algorithm())
+            .then_some(prev),
+            _ => None,
         }
-        (prev_alg == self_alg).then_some(prev)
     }
 
     /// Return `true` if this is backed by a FIPS-approved implementation.
@@ -90,6 +81,8 @@ impl From<&'static Tls13CipherSuite> for SupportedCipherSuite {
 impl PartialEq for Tls13CipherSuite {
     fn eq(&self, other: &Self) -> bool {
         self.common.suite == other.common.suite
+            && self.common.hash_provider.schedule_profile()
+                == other.common.hash_provider.schedule_profile()
     }
 }
 

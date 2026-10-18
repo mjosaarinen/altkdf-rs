@@ -7,21 +7,17 @@ use core::ops::Deref;
 
 use crate::common_state::{CommonState, Side};
 use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm, NONCE_LEN};
-use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError, expand};
-// DECK-FORK (draft-sullivan-tls-xof-ciphers §7.3): the deck reference schedule.
-use deck_schedule::deck::Deck;
-// DECK-FORK (draft §5.5): which PSK binder label — "res binder" (resumption) or
-// "ext binder" (imported external PSK, draft §10).
-pub(crate) use deck_schedule::derive::BinderKind as DeckBinderKind;
-// DECK-FORK (draft §15.7.2.2): zeroize the deck stage secrets held across the
-// handshake. `Secret` is `deck_schedule`'s zeroize-on-drop `Vec<u8>`.
-use deck_schedule::Secret;
-use zeroize::{Zeroize, Zeroizing};
-use crate::crypto::{SharedSecret, hash, hmac};
+use crate::crypto::tls13::{expand, HkdfExpander, OkmBlock, OutputLengthError};
+// DECK-FORK ([key-schedule]): independent framed-XOF implementation.
+use crate::crypto::{hash, hmac, SharedSecret};
 use crate::error::Error;
 use crate::msgs::message::Message;
 use crate::suites::PartiallyExtractedSecrets;
-use crate::{ConnectionTrafficSecrets, KeyLog, Tls13CipherSuite, quic};
+use crate::{quic, ConnectionTrafficSecrets, KeyLog, Tls13CipherSuite};
+pub(crate) use deck_schedule::schedule::PskKind as DeckBinderKind;
+use deck_schedule::schedule::{AppStage, EarlyStage, HandshakeStage};
+use deck_schedule::{Kdf, Protocol, Secret};
+use zeroize::Zeroize;
 
 // We express the state of a contained KeySchedule using these
 // typestates.  This means we can write code that cannot accidentally
@@ -41,10 +37,16 @@ pub(crate) struct KeyScheduleEarly {
 }
 
 impl KeyScheduleEarly {
-    pub(crate) fn new(suite: &'static Tls13CipherSuite, secret: &[u8]) -> Self {
-        Self {
-            ks: KeySchedule::new(suite, secret),
+    pub(crate) fn new(
+        suite: &'static Tls13CipherSuite,
+        secret: &[u8],
+        binder: DeckBinderKind,
+    ) -> Self {
+        let mut ks = KeySchedule::new(suite, secret);
+        if let ScheduleState::Early { kind, .. } = &mut ks.state {
+            *kind = binder;
         }
+        Self { ks }
     }
 
     /// Computes the `client_early_traffic_secret` and writes it
@@ -71,12 +73,8 @@ impl KeyScheduleEarly {
         );
 
         match common.side {
-            Side::Client => self
-                .ks
-                .set_encrypter(&client_early_traffic_secret, common),
-            Side::Server => self
-                .ks
-                .set_decrypter(&client_early_traffic_secret, common),
+            Side::Client => self.ks.set_encrypter(&client_early_traffic_secret, common),
+            Side::Server => self.ks.set_decrypter(&client_early_traffic_secret, common),
         }
 
         if common.is_quic() {
@@ -91,17 +89,8 @@ impl KeyScheduleEarly {
         hs_hash: &hash::Output,
         binder: DeckBinderKind,
     ) -> hmac::Tag {
-        // DECK-FORK (draft §5.5): the PSK binder is the deck two-step derivation
-        // `binder_key = expand(early_secret, LABEL); finished_key = expand(
-        // binder_key, "finished"); MAC(finished_key, suite, LABEL, TH_CH0, FLen)`,
-        // computed once, where LABEL is "res binder" for a resumption PSK or
-        // "ext binder" for an imported external PSK (draft §5.5, §10). Unlike the
-        // RFC 8446 shape rustls uses for Finished, the MAC label here is the binder
-        // label (not "finished"), so this calls `deck_schedule::derive::
-        // binder_verify_data` directly rather than reusing the Finished path.
-        // `hs_hash` is TH_CH0. The two PSK kinds are structurally identical at the
-        // TLS level (pre_shared_key + psk_dhe_ke, no server Certificate) and differ
-        // only here (the label) and in how the PSK secret is obtained.
+        // DECK-FORK ([finished-and-binder-mac]): ebk/ibk/rbk selects the
+        // joint binder/residue derivation; the binder MAC uses fin then mac.
         hmac::Tag::new(&self.ks.binder_verify_data(hs_hash.as_ref(), binder))
     }
 }
@@ -151,8 +140,7 @@ impl KeySchedulePreHandshake {
         mut self,
         shared_secret: SharedSecret,
     ) -> KeyScheduleHandshakeStart {
-        self.ks
-            .input_secret(shared_secret.secret_bytes());
+        self.ks.input_secret(shared_secret.secret_bytes());
         KeyScheduleHandshakeStart { ks: self.ks }
     }
 }
@@ -183,7 +171,10 @@ impl KeyScheduleHandshakeStart {
     ) -> KeyScheduleHandshake {
         debug_assert_eq!(common.side, Side::Client);
         // Suite might have changed due to resumption
-        self.ks.inner = suite.into();
+        self.ks.inner = KeyScheduleSuite {
+            suite,
+            stage: RecordStage::Handshake,
+        };
         let new = self.into_handshake(hs_hash, key_log, client_random, common);
 
         // Decrypt with the peer's key, encrypt with our own key
@@ -222,13 +213,18 @@ impl KeyScheduleHandshakeStart {
         client_hello_inner_random: &[u8],
         hs_hash: hash::Output,
     ) -> Result<[u8; 8], Error> {
-        // DECK-FORK: the deck ECH confirmation is MAC(ClientHelloInner.random,
-        // selected_suite, "ech accept confirmation", TranscriptHash(...), 8)
-        // (draft §5.8) — a different construction from RFC 9849's extract/expand,
-        // not implemented in this prototype. Fail cleanly (a returned error, which
-        // the caller propagates) rather than emit a wrong value or panic.
-        let _ = (client_hello_inner_random, hs_hash);
-        Err(deck_feature_unsupported("ECH acceptance confirmation"))
+        if is_deck_suite(self.ks.suite) {
+            return Err(deck_feature_unsupported("ECH acceptance confirmation"));
+        }
+        Ok(hkdf_expand_label(
+            self.ks
+                .suite
+                .hkdf_provider
+                .extract_from_secret(None, client_hello_inner_random)
+                .as_ref(),
+            SecretKind::ServerEchConfirmationSecret.to_bytes(),
+            hs_hash.as_ref(),
+        ))
     }
 
     fn into_handshake(
@@ -238,8 +234,7 @@ impl KeyScheduleHandshakeStart {
         client_random: &[u8; 32],
         common: &mut CommonState,
     ) -> KeyScheduleHandshake {
-        // `hs_hash` is TH_SH here: the handshake trunk absorbs it before forking
-        // the two traffic-secret leaves (draft §7.3).
+        // DECK-FORK ([key-schedule]): TH_SH is context on the joint leaf.
         let client_secret = self.ks.derive_logged_secret(
             SecretKind::ClientHandshakeTrafficSecret,
             hs_hash.as_ref(),
@@ -254,9 +249,7 @@ impl KeyScheduleHandshakeStart {
             client_random,
         );
 
-        // DECK-FORK (draft §7.3, §7.3.2): ratchet the handshake trunk to
-        // main_secret now that TH_SH is bound — the deck computes it here rather
-        // than at RFC 8446's later master extract, which binds no transcript.
+        // DECK-FORK ([key-schedule]): Ratchet(H) has no transcript context.
         self.ks.enter_master(hs_hash.as_ref());
 
         if common.is_quic() {
@@ -331,9 +324,7 @@ impl KeyScheduleHandshake {
             &before_finished.current_server_traffic_secret,
         );
 
-        before_finished
-            .ks
-            .set_encrypter(server_secret, common);
+        before_finished.ks.set_encrypter(server_secret, common);
 
         if common.is_quic() {
             common.quic.traffic_secrets = Some(quic::Secrets::new(
@@ -383,10 +374,8 @@ impl KeyScheduleBeforeFinished {
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
     ) -> Self {
-        // DECK-FORK (draft §7.3): enter the application stage, retaining TH_SF
-        // (`hs_hash`) so the later `res master` trunk binds both TH_SF and TH_CF.
-        // Replaces RFC 8446's master `input_empty` extract; main_secret was
-        // already ratcheted in `into_handshake`.
+        // DECK-FORK ([key-schedule]): T is unchanged; TH_SF and TH_CF
+        // are separate leaf contexts, never accumulated into the trunk.
         ks.enter_application(hs_hash.as_ref());
 
         let current_client_traffic_secret = ks.derive_logged_secret(
@@ -468,10 +457,8 @@ impl KeyScheduleClientBeforeFinished {
             &next.current_server_traffic_secret,
         );
 
-        next.ks
-            .set_decrypter(server_secret, common);
-        next.ks
-            .set_encrypter(client_secret, common);
+        next.ks.set_decrypter(server_secret, common);
+        next.ks.set_encrypter(client_secret, common);
 
         if common.is_quic() {
             common.quic.traffic_secrets = Some(quic::Secrets::new(
@@ -516,12 +503,9 @@ impl KeyScheduleTrafficWithClientFinishedPending {
             .sign_finish(&self.handshake_client_traffic_secret, hs_hash);
 
         // Install keying to read future messages.
-        self.before_finished.ks.set_decrypter(
-            &self
-                .before_finished
-                .current_client_traffic_secret,
-            common,
-        );
+        self.before_finished
+            .ks
+            .set_decrypter(&self.before_finished.current_client_traffic_secret, common);
 
         (self.before_finished, tag)
     }
@@ -585,29 +569,23 @@ impl KeyScheduleTraffic {
         side: Side,
     ) -> Result<ConnectionTrafficSecrets, Error> {
         let secret = self.next_application_traffic_secret(side);
-        let (key, iv) = deck_record_keys(self.ks.suite, secret.as_ref());
-        Ok(self
-            .ks
-            .suite
-            .aead_alg
-            .extract_keys(key, iv)?)
+        let (key, iv) = deck_record_keys(self.ks.suite, secret.as_ref(), RecordStage::Application);
+        Ok(self.ks.suite.aead_alg.extract_keys(key, iv)?)
     }
 
     pub(crate) fn extract_secrets(&self, side: Side) -> Result<PartiallyExtractedSecrets, Error> {
-        let (client_key, client_iv) =
-            deck_record_keys(self.ks.suite, self.current_client_traffic_secret.as_ref());
-        let (server_key, server_iv) =
-            deck_record_keys(self.ks.suite, self.current_server_traffic_secret.as_ref());
-        let client_secrets = self
-            .ks
-            .suite
-            .aead_alg
-            .extract_keys(client_key, client_iv)?;
-        let server_secrets = self
-            .ks
-            .suite
-            .aead_alg
-            .extract_keys(server_key, server_iv)?;
+        let (client_key, client_iv) = deck_record_keys(
+            self.ks.suite,
+            self.current_client_traffic_secret.as_ref(),
+            RecordStage::Application,
+        );
+        let (server_key, server_iv) = deck_record_keys(
+            self.ks.suite,
+            self.current_server_traffic_secret.as_ref(),
+            RecordStage::Application,
+        );
+        let client_secrets = self.ks.suite.aead_alg.extract_keys(client_key, client_iv)?;
+        let server_secrets = self.ks.suite.aead_alg.extract_keys(server_key, server_iv)?;
 
         let (tx, rx) = match side {
             Side::Client => (client_secrets, server_secrets),
@@ -629,74 +607,64 @@ impl KeyScheduleResumption {
     }
 }
 
-// ---- DECK-FORK glue (draft-sullivan-tls-xof-ciphers) -----------------------
-
-/// The deck schedule profile a cipher suite selects (draft §3, Table 1). This
-/// fork's key schedule serves deck suites only; a non-deck suite here is a
-/// programming error (the deck `CryptoProvider` offers no others).
-fn deck_profile(suite: &Tls13CipherSuite) -> &'static deck_schedule::profile::Profile {
-    use deck_schedule::profile::{SHAKE256, TURBOSHAKE256};
-    match u16::from(suite.common.suite) {
-        0xFF01..=0xFF03 => &TURBOSHAKE256,
-        0xFF04..=0xFF05 => &SHAKE256,
-        other => unreachable!("DECK-FORK: non-deck cipher suite {other:#06x} in the deck key schedule"),
-    }
+// ---- DECK-FORK: KDF metadata is carried by internal virtual suites. --------
+pub(crate) fn deck_kdf(suite: &Tls13CipherSuite) -> Option<Kdf> {
+    suite
+        .common
+        .hash_provider
+        .schedule_profile()
+        .and_then(Kdf::from_id)
 }
-
-/// The governing cipher-suite code point bound into every deck output (draft §4).
-fn deck_suite_cp(suite: &Tls13CipherSuite) -> u16 {
-    u16::from(suite.common.suite)
-}
-
-/// Whether `suite` is one of this document's deck cipher suites (draft §6). Deck
-/// suites route through the deck schedule and, in this prototype, defer 0-RTT
-/// (draft §11), so the server derives no client early-traffic secret for them.
 pub(crate) fn is_deck_suite(suite: &Tls13CipherSuite) -> bool {
-    matches!(u16::from(suite.common.suite), 0xFF01..=0xFF05)
+    deck_kdf(suite).is_some()
 }
-
-/// A clean error for a deck feature this prototype does not implement (draft
-/// §5.8 ECH acceptance confirmation). Returned rather than panicked, so the
-/// handshake fails cleanly instead of unwinding. 0-RTT is handled by refusing to
-/// negotiate it (`is_deck_suite`), not by this error.
 fn deck_feature_unsupported(feature: &str) -> Error {
     Error::General(alloc::format!(
-        "{feature} is not implemented for deck cipher suites"
+        "{feature} is not implemented for XOF schedules"
     ))
 }
-
-/// `early_secret = Ratchet(Init(); Absorb(E,"psk", psk))` (draft §7.3, §7.3.1).
-fn deck_early_secret(suite: &Tls13CipherSuite, psk: &[u8]) -> Secret {
-    let mut e = Deck::init(deck_profile(suite));
-    e.absorb(b"psk", psk);
-    Zeroizing::new(e.ratchet(b"early secret"))
+#[derive(Clone, Copy)]
+enum RecordStage {
+    Early,
+    Handshake,
+    Application,
 }
 
-/// Record write_key / write_iv from a traffic secret in one deck expansion,
-/// split `key ‖ iv` (draft §5.3).
-fn deck_record_keys(suite: &'static Tls13CipherSuite, secret: &[u8]) -> (AeadKey, Iv) {
+fn deck_record_keys(
+    suite: &'static Tls13CipherSuite,
+    secret: &[u8],
+    stage: RecordStage,
+) -> (AeadKey, Iv) {
+    let Some(kdf) = deck_kdf(suite) else {
+        let expander = suite.hkdf_provider.expander_for_okm(&OkmBlock::new(secret));
+        return (
+            derive_traffic_key(expander.as_ref(), suite.aead_alg),
+            derive_traffic_iv(expander.as_ref()),
+        );
+    };
     let nk = suite.aead_alg.key_len();
-    let (key, iv) = deck_schedule::derive::record_keys(
-        deck_profile(suite),
-        secret,
-        deck_suite_cp(suite),
-        nk,
-        NONCE_LEN,
-    );
-    let mut kbuf = [0u8; AeadKey::MAX_LEN];
-    kbuf[..nk].copy_from_slice(&key);
-    let mut ivbuf = [0u8; NONCE_LEN];
-    ivbuf.copy_from_slice(&iv);
-    // `AeadKey`/`Iv` copy the bytes in and zeroize themselves on drop; erase the
-    // stack scratch too (draft §15.7.2.2). (`key`/`iv` are already `Secret`.)
-    let keys = (AeadKey::from(kbuf).with_length(nk), Iv::from(ivbuf));
-    kbuf.zeroize();
-    ivbuf.zeroize();
-    keys
+    let keys = match stage {
+        RecordStage::Early => {
+            deck_schedule::derive::early_record_keys(kdf, Protocol::Tls13, secret, nk, NONCE_LEN)
+        }
+        RecordStage::Handshake => {
+            deck_schedule::derive::handshake_record(kdf, Protocol::Tls13, secret, nk, NONCE_LEN).1
+        }
+        RecordStage::Application => {
+            deck_schedule::derive::application_record(kdf, Protocol::Tls13, secret, nk, NONCE_LEN).1
+        }
+    };
+    let mut kb = [0u8; AeadKey::MAX_LEN];
+    kb[..nk].copy_from_slice(&keys.key);
+    let mut ivb = [0u8; NONCE_LEN];
+    ivb.copy_from_slice(&keys.iv);
+    let result = (AeadKey::from(kb).with_length(nk), Iv::from(ivb));
+    kb.zeroize();
+    ivb.zeroize();
+    result
 }
 
-/// Secrets a no-PSK 1-RTT deck handshake derives, for cross-checking against the
-/// `deck-schedule` reference (draft §7.3). See [`deck_schedule_selftest`].
+/// Test-only cross-check of the fork's typestate wiring.
 #[doc(hidden)]
 pub struct DeckScheduleSelftest {
     pub c_hs_traffic: Vec<u8>,
@@ -709,15 +677,6 @@ pub struct DeckScheduleSelftest {
     pub record_key: Vec<u8>,
     pub record_iv: Vec<u8>,
 }
-
-/// DECK-FORK test hook: drive the forked (deck) `KeySchedule` through the exact
-/// no-PSK 1-RTT order the typestates use — `input_secret` → derive both handshake
-/// secrets → `enter_master(TH_SH)` → `enter_application(TH_SF)` → derive the
-/// application/exporter/resumption secrets → Finished + record keys — and return
-/// the results. A root `rustls-integration` test compares these to
-/// `deck_schedule`'s one-shot `schedule::run`, validating the schedule wiring
-/// (the fork's `key_schedule` module is `pub(crate)`, so this is the reachable
-/// seam). Not used in production; behind `#[doc(hidden)]`.
 #[doc(hidden)]
 pub fn deck_schedule_selftest(
     suite: &'static Tls13CipherSuite,
@@ -730,222 +689,161 @@ pub fn deck_schedule_selftest(
     use SecretKind::*;
     let mut ks = KeySchedule::new_with_empty_secret(suite);
     ks.input_secret(dhe);
-    let c_hs = ks.derive(ClientHandshakeTrafficSecret, th_sh);
-    let s_hs = ks.derive(ServerHandshakeTrafficSecret, th_sh);
+    let c = ks.derive(ClientHandshakeTrafficSecret, th_sh);
+    let s = ks.derive(ServerHandshakeTrafficSecret, th_sh);
+    let fin = ks.sign_verify_data(&s, &hash::Output::new(finished_transcript));
+    let (rk, iv) = deck_record_keys(suite, s.as_ref(), RecordStage::Handshake);
     ks.enter_master(th_sh);
     ks.enter_application(th_sf);
-    let c_ap = ks.derive(ClientApplicationTrafficSecret, th_sf);
-    let s_ap = ks.derive(ServerApplicationTrafficSecret, th_sf);
-    let exp = ks.derive(ExporterMasterSecret, th_sf);
-    let res = ks.derive(ResumptionMasterSecret, th_cf);
-    let server_finished = ks.sign_verify_data(&s_hs, &hash::Output::new(finished_transcript));
-    let (rk, riv) = deck_record_keys(suite, s_hs.as_ref());
     DeckScheduleSelftest {
-        c_hs_traffic: c_hs.as_ref().to_vec(),
-        s_hs_traffic: s_hs.as_ref().to_vec(),
-        c_ap_traffic: c_ap.as_ref().to_vec(),
-        s_ap_traffic: s_ap.as_ref().to_vec(),
-        exp_master: exp.as_ref().to_vec(),
-        res_master: res.as_ref().to_vec(),
-        server_finished: server_finished.as_ref().to_vec(),
+        c_hs_traffic: c.as_ref().to_vec(),
+        s_hs_traffic: s.as_ref().to_vec(),
+        c_ap_traffic: ks
+            .derive(ClientApplicationTrafficSecret, th_sf)
+            .as_ref()
+            .to_vec(),
+        s_ap_traffic: ks
+            .derive(ServerApplicationTrafficSecret, th_sf)
+            .as_ref()
+            .to_vec(),
+        exp_master: ks.derive(ExporterMasterSecret, th_sf).as_ref().to_vec(),
+        res_master: ks.derive(ResumptionMasterSecret, th_cf).as_ref().to_vec(),
+        server_finished: fin.as_ref().to_vec(),
         record_key: rk.as_ref().to_vec(),
-        record_iv: riv.as_ref().to_vec(),
+        record_iv: iv.as_ref().to_vec(),
     }
 }
-
-/// DECK-FORK test hook: confirm both ECH acceptance-confirmation paths (draft
-/// §5.8), which this prototype does not implement, fail **cleanly** — a returned
-/// `Error`, never a panic — for a deck suite. Returns `true` only if both the
-/// non-HRR (typestate method) and HRR (free function) paths returned an error.
-/// Not used in production; behind `#[doc(hidden)]`.
 #[doc(hidden)]
 pub fn deck_ech_confirmations_fail_cleanly(suite: &'static Tls13CipherSuite) -> bool {
-    // Non-HRR confirmation: a method on the handshake-start typestate.
     let mut hs =
         KeySchedulePreHandshake::new(suite).into_handshake(SharedSecret::from(&[0x42u8; 32][..]));
-    let non_hrr = hs
-        .server_ech_confirmation_secret(&[0u8; 32], hash::Output::new(&[0u8; 64]))
-        .is_err();
-    // HRR confirmation: a free function keyed only by the (unused) hkdf_provider.
-    let hrr = server_ech_hrr_confirmation_secret(
-        suite.hkdf_provider,
-        &[0u8; 32],
-        hash::Output::new(&[0u8; 64]),
-    )
-    .is_err();
-    non_hrr && hrr
+    hs.server_ech_confirmation_secret(&[0; 32], hash::Output::new(&[0; 64]))
+        .is_err()
+        && server_ech_hrr_confirmation_secret(suite, &[0; 32], hash::Output::new(&[0; 64])).is_err()
 }
 
-/// This is the TLS 1.3 deck key schedule (draft §7.3). DECK-FORK: in place of
-/// rustls's HKDF extract/expand `current` PRK, it holds the running deck stage
-/// state. Each stage's leaves fork off a trunk that has absorbed that stage's
-/// transcript checkpoint, and the stage boundaries are explicit ratchets
-/// (`early secret`, `main secret`). Used only through the typestates.
+enum ScheduleState {
+    Hkdf(Box<dyn HkdfExpander>),
+    Early { psk: Secret, kind: DeckBinderKind },
+    Handshake(HandshakeStage),
+    Application(AppStage),
+    Retired,
+}
 struct KeySchedule {
-    state: DeckState,
+    state: ScheduleState,
     inner: KeyScheduleSuite,
 }
-
-/// The current stage of the deck schedule (draft §7.3). Its live secrets —
-/// `early_secret`, the (EC)DHE components, and `main_secret` — are held as
-/// [`Secret`], so they (and the clones taken at stage transitions) are zeroized
-/// on drop (draft §15.7.2.2). `th_sf` is a public transcript hash.
-enum DeckState {
-    /// `early_secret` ratcheted from the early stage; seeds the handshake stage.
-    Early { early_secret: Secret },
-    /// Handshake stage: `early_secret` and the (EC)DHE components are known,
-    /// awaiting `TH_SH` before the leaves and the `main secret` ratchet.
-    Handshake { early_secret: Secret, dhe: Vec<Secret> },
-    /// `main_secret` ratcheted from the handshake trunk (binds `TH_SH`, draft
-    /// §7.3.2); seeds the application stage.
-    Master { main_secret: Secret },
-    /// Application stage: `main_secret` plus the retained `TH_SF` (needed so the
-    /// `res master` trunk can bind both `TH_SF` and `TH_CF`).
-    Application { main_secret: Secret, th_sf: Vec<u8> },
-}
-
 impl KeySchedule {
-    /// Early stage keyed by a PSK (draft §7.3).
     fn new(suite: &'static Tls13CipherSuite, secret: &[u8]) -> Self {
         Self {
-            state: DeckState::Early {
-                early_secret: deck_early_secret(suite, secret),
+            state: if is_deck_suite(suite) {
+                ScheduleState::Early {
+                    psk: zeroize::Zeroizing::new(secret.to_vec()),
+                    kind: DeckBinderKind::Resumption,
+                }
+            } else {
+                ScheduleState::Hkdf(suite.hkdf_provider.extract_from_secret(None, secret))
             },
             inner: suite.into(),
         }
     }
-
-    /// No-PSK early stage: `Absorb(E,"psk","")`, then ratchet (draft §7.3.1).
     fn new_with_empty_secret(suite: &'static Tls13CipherSuite) -> Self {
-        Self {
-            state: DeckState::Early {
-                early_secret: deck_early_secret(suite, b""),
-            },
-            inner: suite.into(),
+        if is_deck_suite(suite) {
+            Self::new(suite, b"")
+        } else {
+            Self {
+                state: ScheduleState::Hkdf(suite.hkdf_provider.extract_from_zero_ikm(None)),
+                inner: suite.into(),
+            }
         }
     }
-
-    /// Absorb one (EC)DHE component into the handshake stage (draft §7.3), in
-    /// group order. This fork offers only single-secret (non-hybrid) groups, so
-    /// exactly one component is absorbed; hybrid ordering is out of scope.
     fn input_secret(&mut self, secret: &[u8]) {
-        match &mut self.state {
-            DeckState::Early { early_secret } => {
-                self.state = DeckState::Handshake {
-                    early_secret: core::mem::take(early_secret),
-                    dhe: alloc::vec![Zeroizing::new(secret.to_vec())],
-                };
-            }
-            DeckState::Handshake { dhe, .. } => dhe.push(Zeroizing::new(secret.to_vec())),
-            _ => unreachable!("DECK-FORK: input_secret in wrong schedule stage"),
+        if let ScheduleState::Hkdf(current) = &self.state {
+            let empty = self.suite.common.hash_provider.hash(b"");
+            let salt = hkdf_expand_label_block(current.as_ref(), b"derived", empty.as_ref());
+            self.state = ScheduleState::Hkdf(
+                self.suite
+                    .hkdf_provider
+                    .extract_from_secret(Some(salt.as_ref()), secret),
+            );
+            return;
         }
-    }
-
-    /// Ratchet the handshake trunk to `main_secret` (draft §7.3): binds `TH_SH`.
-    /// Called once the handshake-stage leaves have been derived.
-    fn enter_master(&mut self, th_sh: &[u8]) {
-        let (early_secret, dhe) = match &self.state {
-            DeckState::Handshake { early_secret, dhe } => (early_secret.clone(), dhe.clone()),
-            _ => unreachable!("DECK-FORK: enter_master in wrong schedule stage"),
+        let state = core::mem::replace(&mut self.state, ScheduleState::Retired);
+        let mut h = match state {
+            ScheduleState::Early { psk, kind } => EarlyStage::new(
+                deck_kdf(self.suite).unwrap(),
+                Protocol::Tls13,
+                (!psk.is_empty()).then_some((psk.as_slice(), kind)),
+            )
+            .expect("validated PSK")
+            .into_handshake(),
+            ScheduleState::Handshake(h) => h,
+            _ => unreachable!("internal schedule stage ordering"),
         };
-        let h = self.handshake_trunk(&early_secret, &dhe, th_sh);
-        self.state = DeckState::Master {
-            main_secret: Zeroizing::new(h.ratchet(b"main secret")),
-        };
+        h.absorb(secret).expect("bounded group secret");
+        self.state = ScheduleState::Handshake(h);
+        self.inner.stage = RecordStage::Handshake;
     }
-
-    /// Enter the application stage, retaining `TH_SF` for later `res master`
-    /// (draft §7.3). Replaces RFC 8446's master `input_empty` extract; the deck
-    /// `main_secret` was already ratcheted in [`Self::enter_master`].
-    fn enter_application(&mut self, th_sf: &[u8]) {
-        let main_secret = match &self.state {
-            DeckState::Master { main_secret } | DeckState::Application { main_secret, .. } => {
-                main_secret.clone()
-            }
-            _ => unreachable!("DECK-FORK: enter_application in wrong schedule stage"),
-        };
-        self.state = DeckState::Application {
-            main_secret,
-            th_sf: th_sf.to_vec(),
-        };
-    }
-
-    fn suite(&self) -> &'static Tls13CipherSuite {
-        self.inner.suite
-    }
-
-    /// Handshake trunk `H`: `Init; Absorb("early"); Absorb("dh")*; Absorb("th")`.
-    fn handshake_trunk(&self, early_secret: &[u8], dhe: &[Secret], th_sh: &[u8]) -> Deck<'static> {
-        let mut h = Deck::init(deck_profile(self.suite()));
-        h.absorb(b"early", early_secret);
-        for comp in dhe {
-            h.absorb(b"dh", comp);
+    fn enter_master(&mut self, _th_sh: &[u8]) {
+        if matches!(self.state, ScheduleState::Hkdf(_)) {
+            return;
         }
-        h.absorb(b"th", th_sh);
-        h
+        let ScheduleState::Handshake(h) =
+            core::mem::replace(&mut self.state, ScheduleState::Retired)
+        else {
+            unreachable!("internal stage ordering")
+        };
+        self.state = ScheduleState::Application(h.into_application());
     }
-
-    /// Application trunk `T`: `Init; Absorb("main"); Absorb("th", TH_SF)`.
-    fn application_trunk(&self, main_secret: &[u8], th_sf: &[u8]) -> Deck<'static> {
-        let mut t = Deck::init(deck_profile(self.suite()));
-        t.absorb(b"main", main_secret);
-        t.absorb(b"th", th_sf);
-        t
+    fn enter_application(&mut self, _th_sf: &[u8]) {
+        if let ScheduleState::Hkdf(current) = &self.state {
+            let empty = self.suite.common.hash_provider.hash(b"");
+            let salt = hkdf_expand_label_block(current.as_ref(), b"derived", empty.as_ref());
+            self.state = ScheduleState::Hkdf(
+                self.suite
+                    .hkdf_provider
+                    .extract_from_zero_ikm(Some(salt.as_ref())),
+            );
+        }
+        self.inner.stage = RecordStage::Application;
     }
-
-    /// Derive a leaf secret of the given `kind`, forking the current stage's
-    /// trunk under the kind's (RFC 8446 = deck) label (draft §5.1, §7.3). The
-    /// caller passes the stage transcript checkpoint as `hs_hash`.
     fn derive(&self, kind: SecretKind, hs_hash: &[u8]) -> OkmBlock {
         use SecretKind::*;
-        let suite = self.suite();
-        let cp = deck_suite_cp(suite);
-        let sl = deck_profile(suite).secret_len;
-        // Zeroize the squeezed leaf once it is copied into the `OkmBlock` (which
-        // zeroizes in turn) — draft §15.7.2.2.
-        let out = Zeroizing::new(match kind {
-            ClientHandshakeTrafficSecret | ServerHandshakeTrafficSecret => {
-                let DeckState::Handshake { early_secret, dhe } = &self.state else {
-                    unreachable!("DECK-FORK: handshake-secret derive in wrong stage");
-                };
-                self.handshake_trunk(early_secret, dhe, hs_hash)
-                    .fork(kind.to_bytes(), cp)
-                    .squeeze(b"out", sl)
+        if let ScheduleState::Hkdf(current) = &self.state {
+            return hkdf_expand_label_block(current.as_ref(), kind.to_bytes(), hs_hash);
+        }
+        let out = match (&self.state, kind) {
+            (
+                ScheduleState::Handshake(h),
+                ClientHandshakeTrafficSecret | ServerHandshakeTrafficSecret,
+            ) => {
+                let (c, s) = h.traffic(hs_hash).expect("bounded transcript");
+                if kind == ClientHandshakeTrafficSecret {
+                    c
+                } else {
+                    s
+                }
             }
-            ClientApplicationTrafficSecret | ServerApplicationTrafficSecret | ExporterMasterSecret => {
-                let DeckState::Application { main_secret, th_sf } = &self.state else {
-                    unreachable!("DECK-FORK: application-secret derive in wrong stage");
-                };
-                self.application_trunk(main_secret, th_sf)
-                    .fork(kind.to_bytes(), cp)
-                    .squeeze(b"out", sl)
+            (
+                ScheduleState::Application(a),
+                ClientApplicationTrafficSecret
+                | ServerApplicationTrafficSecret
+                | ExporterMasterSecret,
+            ) => {
+                let (c, s, e) = a.traffic(hs_hash).expect("bounded transcript");
+                match kind {
+                    ClientApplicationTrafficSecret => c,
+                    ServerApplicationTrafficSecret => s,
+                    _ => e,
+                }
             }
-            ResumptionMasterSecret => {
-                let DeckState::Application { main_secret, th_sf } = &self.state else {
-                    unreachable!("DECK-FORK: resumption derive in wrong stage");
-                };
-                let mut t = self.application_trunk(main_secret, th_sf);
-                t.absorb(b"th", hs_hash); // TH_CF
-                t.fork(kind.to_bytes(), cp).squeeze(b"out", sl)
+            (ScheduleState::Application(a), ResumptionMasterSecret) => {
+                a.resumption(hs_hash).expect("bounded transcript")
             }
-            // These `SecretKind`s are never derived through `derive` for a deck
-            // suite, so reaching them is a fork-internal bug, not a peer- or
-            // config-reachable condition (draft §7.3): 0-RTT early secrets are
-            // gated off at negotiation (`is_deck_suite`, draft §11); the PSK
-            // binder key uses `binder_verify_data` (draft §5.5); the deck crosses
-            // stage boundaries with ratchets, not a `Derive-Secret "derived"` step;
-            // and the ECH confirmations return a clean error from their own
-            // functions (draft §5.8), never via `derive`.
-            ClientEarlyTrafficSecret => unreachable!("deck 0-RTT is gated off (draft §11)"),
-            ResumptionPskBinderKey => unreachable!("deck binder uses binder_verify_data"),
-            DerivedSecret => unreachable!("deck crosses stages with ratchets, not Derive-Secret"),
-            ServerEchConfirmationSecret | ServerEchHrrConfirmationSecret => {
-                unreachable!("deck ECH confirmations return an error from their own path")
-            }
-        });
+            _ => unreachable!("unsupported feature gated before schedule"),
+        };
         OkmBlock::new(&out)
     }
-
     fn derive_logged_secret(
         &self,
         kind: SecretKind,
@@ -955,35 +853,35 @@ impl KeySchedule {
     ) -> OkmBlock {
         let output = self.derive(kind, hs_hash);
 
-        let log_label = kind
-            .log_label()
-            .expect("not a loggable secret");
+        let log_label = kind.log_label().expect("not a loggable secret");
         if key_log.will_log(log_label) {
             key_log.log(log_label, client_random, output.as_ref());
         }
         output
     }
 
-    /// PSK binder `verify_data` (draft §5.5), from the live early stage keyed by
-    /// the PSK. `th_ch0` is `TH_CH0` (the transcript through the truncated
-    /// ClientHello, excluding binders; draft §2.1, §5.5). `binder` selects the
-    /// label: `"res binder"` for a resumption PSK or `"ext binder"` for an
-    /// imported external PSK (draft §5.5, §10).
-    ///
-    /// The early stage binds no cipher suite (draft §7.3), so the client can
-    /// compute this before the ServerHello; the governing suite is the PSK's
-    /// recorded suite, bound at the binder's own forks and MAC (draft §4).
     fn binder_verify_data(&self, th_ch0: &[u8], binder: DeckBinderKind) -> Vec<u8> {
-        let DeckState::Early { early_secret } = &self.state else {
-            unreachable!("DECK-FORK: PSK binder derived outside the early stage");
+        if let ScheduleState::Hkdf(current) = &self.state {
+            let empty = self.suite.common.hash_provider.hash(b"");
+            let label = if binder == DeckBinderKind::Resumption {
+                b"res binder".as_slice()
+            } else {
+                b"ext binder"
+            };
+            let bk = hkdf_expand_label_block(current.as_ref(), label, empty.as_ref());
+            return self
+                .sign_verify_data(&bk, &hash::Output::new(th_ch0))
+                .as_ref()
+                .to_vec();
+        }
+        let ScheduleState::Early { psk, kind } = &self.state else {
+            unreachable!("binder outside early stage")
         };
-        deck_schedule::derive::binder_verify_data(
-            deck_profile(self.suite()),
-            early_secret,
-            binder,
-            deck_suite_cp(self.suite()),
-            th_ch0,
-        )
+        debug_assert_eq!(*kind, binder);
+        let k = deck_kdf(self.suite).unwrap();
+        let e = EarlyStage::new(k, Protocol::Tls13, Some((psk, binder))).expect("validated PSK");
+        let (bk, _) = e.binder_key().expect("valid binder descriptors");
+        deck_schedule::derive::binder_verify_data(k, Protocol::Tls13, &bk, th_ch0)
     }
 }
 
@@ -1000,17 +898,16 @@ impl Deref for KeySchedule {
 #[derive(Clone, Copy)]
 struct KeyScheduleSuite {
     suite: &'static Tls13CipherSuite,
+    stage: RecordStage,
 }
 
 impl KeyScheduleSuite {
     fn set_encrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
-        let (key, iv) = deck_record_keys(self.suite, secret.as_ref());
-        common
-            .record_layer
-            .set_message_encrypter(
-                self.suite.aead_alg.encrypter(key, iv),
-                self.suite.common.confidentiality_limit,
-            );
+        let (key, iv) = deck_record_keys(self.suite, secret.as_ref(), self.stage);
+        common.record_layer.set_message_encrypter(
+            self.suite.aead_alg.encrypter(key, iv),
+            self.suite.common.confidentiality_limit,
+        );
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
@@ -1020,44 +917,72 @@ impl KeyScheduleSuite {
     }
 
     fn derive_decrypter(&self, secret: &OkmBlock) -> Box<dyn MessageDecrypter> {
-        let (key, iv) = deck_record_keys(self.suite, secret.as_ref());
+        let (key, iv) = deck_record_keys(self.suite, secret.as_ref(), self.stage);
         self.suite.aead_alg.decrypter(key, iv)
     }
 
-    /// Finished verify_data over `hs_hash`, keyed by a traffic secret (draft
-    /// §5.5): `finished_key = expand(base_key,"finished"); MAC(finished_key,
-    /// suite, "finished", hs_hash, FLen)`.
+    /// DECK-FORK ([record-keys-generic]): use the handshake DeriveN fin slice.
     fn sign_finish(&self, base_key: &OkmBlock, hs_hash: &hash::Output) -> hmac::Tag {
         self.sign_verify_data(base_key, hs_hash)
     }
 
     fn sign_verify_data(&self, base_key: &OkmBlock, hs_hash: &hash::Output) -> hmac::Tag {
-        let verify_data = deck_schedule::derive::finished_verify_data(
-            deck_profile(self.suite),
-            base_key.as_ref(),
-            deck_suite_cp(self.suite),
-            hs_hash.as_ref(),
-        );
-        hmac::Tag::new(&verify_data)
+        if let Some(k) = deck_kdf(self.suite) {
+            let (fk, _) = deck_schedule::derive::handshake_record(
+                k,
+                Protocol::Tls13,
+                base_key.as_ref(),
+                self.suite.aead_alg.key_len(),
+                NONCE_LEN,
+            );
+            hmac::Tag::new(&deck_schedule::derive::finished_verify_data(
+                k,
+                Protocol::Tls13,
+                &fk,
+                hs_hash.as_ref(),
+            ))
+        } else {
+            let expander = self.suite.hkdf_provider.expander_for_okm(base_key);
+            let hmac_key = hkdf_expand_label_block(expander.as_ref(), b"finished", &[]);
+
+            self.suite
+                .hkdf_provider
+                .hmac_sign(&hmac_key, hs_hash.as_ref())
+        }
     }
 
-    /// Next application traffic-secret generation (draft §5.4).
+    /// Next application traffic-secret generation ([key-update-generic]).
     fn derive_next(&self, base_key: &OkmBlock) -> OkmBlock {
-        OkmBlock::new(&deck_schedule::derive::key_update(
-            deck_profile(self.suite),
-            base_key.as_ref(),
-            deck_suite_cp(self.suite),
-        ))
+        if let Some(k) = deck_kdf(self.suite) {
+            OkmBlock::new(
+                &deck_schedule::derive::application_record(
+                    k,
+                    Protocol::Tls13,
+                    base_key.as_ref(),
+                    self.suite.aead_alg.key_len(),
+                    NONCE_LEN,
+                )
+                .0,
+            )
+        } else {
+            let expander = self.suite.hkdf_provider.expander_for_okm(base_key);
+            hkdf_expand_label_block(expander.as_ref(), b"traffic upd", &[])
+        }
     }
 
-    /// Resumption PSK for a NewSessionTicket (draft §5.7).
+    /// Resumption PSK for a NewSessionTicket ([expand-op]).
     fn derive_ticket_psk(&self, rms: &OkmBlock, nonce: &[u8]) -> OkmBlock {
-        OkmBlock::new(&deck_schedule::derive::resumption_psk(
-            deck_profile(self.suite),
-            rms.as_ref(),
-            deck_suite_cp(self.suite),
-            nonce,
-        ))
+        if let Some(k) = deck_kdf(self.suite) {
+            OkmBlock::new(&deck_schedule::derive::resumption_psk(
+                k,
+                Protocol::Tls13,
+                rms.as_ref(),
+                nonce,
+            ))
+        } else {
+            let expander = self.suite.hkdf_provider.expander_for_okm(rms);
+            hkdf_expand_label_block(expander.as_ref(), b"resumption", nonce)
+        }
     }
 
     fn export_keying_material(
@@ -1067,25 +992,44 @@ impl KeyScheduleSuite {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<(), Error> {
-        // draft §5.6: TLS-Exporter, keyed by the exporter master secret; the
-        // label and context are reduced by TranscriptHash inside `exporter`.
-        let material = deck_schedule::derive::exporter(
-            deck_profile(self.suite),
-            current_exporter_secret.as_ref(),
-            deck_suite_cp(self.suite),
-            label,
-            context.unwrap_or(&[]),
-            out.len(),
-        )
-        .map_err(|_| Error::General("exporting too much".to_string()))?;
-        out.copy_from_slice(&material);
-        Ok(())
+        if let Some(k) = deck_kdf(self.suite) {
+            let material = deck_schedule::derive::exporter(
+                k,
+                Protocol::Tls13,
+                current_exporter_secret.as_ref(),
+                label,
+                context.unwrap_or(&[]),
+                out.len(),
+            )
+            .map_err(|e| Error::General(e.to_string()))?;
+            out.copy_from_slice(&material);
+            Ok(())
+        } else {
+            let secret = {
+                let h_empty = self.suite.common.hash_provider.hash(&[]);
+
+                let expander = self
+                    .suite
+                    .hkdf_provider
+                    .expander_for_okm(current_exporter_secret);
+                hkdf_expand_label_block(expander.as_ref(), label, h_empty.as_ref())
+            };
+
+            let h_context = self.suite.common.hash_provider.hash(context.unwrap_or(&[]));
+
+            let expander = self.suite.hkdf_provider.expander_for_okm(&secret);
+            hkdf_expand_label_slice(expander.as_ref(), b"exporter", h_context.as_ref(), out)
+                .map_err(|_| Error::General("exporting too much".to_string()))
+        }
     }
 }
 
 impl From<&'static Tls13CipherSuite> for KeyScheduleSuite {
     fn from(suite: &'static Tls13CipherSuite) -> Self {
-        Self { suite }
+        Self {
+            suite,
+            stage: RecordStage::Early,
+        }
     }
 }
 
@@ -1145,9 +1089,6 @@ pub(crate) fn hkdf_expand_label_aead_key(
 /// [HKDF-Expand-Label] where the output is a slice.
 ///
 /// This can fail because HKDF-Expand is limited in its maximum output length.
-// DECK-FORK: unused after the deck exporter replaced HKDF-Expand-Label here
-// (draft §5.6); kept for parity with the other HKDF-Expand-Label helpers.
-#[allow(dead_code)]
 fn hkdf_expand_label_slice(
     expander: &dyn HkdfExpander,
     label: &[u8],
@@ -1160,18 +1101,21 @@ fn hkdf_expand_label_slice(
 }
 
 pub(crate) fn server_ech_hrr_confirmation_secret(
-    hkdf_provider: &'static dyn Hkdf,
+    suite: &Tls13CipherSuite,
     client_hello_inner_random: &[u8],
     hs_hash: hash::Output,
 ) -> Result<[u8; 8], Error> {
-    // DECK-FORK: the deck HRR ECH confirmation is MAC(ClientHelloInner.random,
-    // selected_suite, "hrr ech accept confirmation", TranscriptHash(...), 8)
-    // (draft §5.8), a different construction from RFC 9849's extract/expand — and
-    // this seam has only `hkdf_provider`, not the governing suite, so it could not
-    // build the deck MAC anyway. Not implemented in this prototype: fail cleanly
-    // (a returned error the caller propagates) rather than emit a wrong value.
-    let _ = (hkdf_provider, client_hello_inner_random, hs_hash);
-    Err(deck_feature_unsupported("HRR ECH acceptance confirmation"))
+    if is_deck_suite(suite) {
+        return Err(deck_feature_unsupported("HRR ECH acceptance confirmation"));
+    }
+    Ok(hkdf_expand_label(
+        suite
+            .hkdf_provider
+            .extract_from_secret(None, client_hello_inner_random)
+            .as_ref(),
+        SecretKind::ServerEchHrrConfirmationSecret.to_bytes(),
+        hs_hash.as_ref(),
+    ))
 }
 
 fn hkdf_expand_label_inner<F, T>(
@@ -1269,9 +1213,9 @@ mod tests {
     use super::provider::tls13::{
         TLS13_AES_128_GCM_SHA256_INTERNAL, TLS13_CHACHA20_POLY1305_SHA256_INTERNAL,
     };
-    use super::{KeySchedule, SecretKind, derive_traffic_iv, derive_traffic_key};
-    use crate::KeyLog;
+    use super::{derive_traffic_iv, derive_traffic_key, KeySchedule, SecretKind};
     use crate::msgs::enums::HashAlgorithm;
+    use crate::KeyLog;
 
     #[test]
     fn empty_hash() {
@@ -1302,11 +1246,7 @@ mod tests {
         );
 
         // a theoretical example of unsupported hash
-        assert!(
-            HashAlgorithm::SHA1
-                .hash_for_empty_input()
-                .is_none()
-        );
+        assert!(HashAlgorithm::SHA1.hash_for_empty_input().is_none());
     }
 
     #[test]
@@ -1491,7 +1431,7 @@ mod benchmarks {
         use core::fmt::Debug;
 
         use super::provider::tls13::TLS13_CHACHA20_POLY1305_SHA256_INTERNAL;
-        use super::{KeySchedule, SecretKind, derive_traffic_iv, derive_traffic_key};
+        use super::{derive_traffic_iv, derive_traffic_key, KeySchedule, SecretKind};
         use crate::KeyLog;
 
         fn extract_traffic_secret(ks: &KeySchedule, kind: SecretKind) {

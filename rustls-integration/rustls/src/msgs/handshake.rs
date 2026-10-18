@@ -687,6 +687,24 @@ impl TlsListElement for KeyShareEntry {
     const SIZE_LEN: ListLength = ListLength::U16;
 }
 
+// DECK-FORK ([cipher-suites]): uint16 profiles<2..2^16-2>.
+#[derive(Clone,Debug)]
+pub(crate) struct ScheduleProfileList(pub(crate) Vec<u16>);
+impl Codec<'_> for ScheduleProfileList {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        ((self.0.len()*2) as u16).encode(bytes);
+        for id in &self.0 { id.encode(bytes); }
+    }
+    fn read(r: &mut Reader<'_>) -> Result<Self,InvalidMessage> {
+        let n=u16::read(r)? as usize;
+        if n<2 || n%2!=0 { return Err(InvalidMessage::InvalidEmptyPayload); }
+        let mut sub=r.sub(n)?;
+        let mut ids=Vec::with_capacity(n/2);
+        while sub.any_left() { ids.push(u16::read(&mut sub)?); }
+        Ok(Self(ids))
+    }
+}
+
 /// The body of the `SupportedVersions` extension when it appears in a
 /// `ClientHello`
 ///
@@ -836,6 +854,8 @@ extension_struct! {
     ///
     /// Unknown extensions are dropped during parsing.
     pub(crate) struct ClientExtensions<'a> {
+        ExtensionType::ScheduleProfile =>
+            pub(crate) schedule_profiles: Option<ScheduleProfileList>,
         /// Requested server name indication (RFC6066)
         ExtensionType::ServerName =>
             pub(crate) server_name: Option<ServerNamePayload<'a>>,
@@ -939,6 +959,7 @@ extension_struct! {
 impl ClientExtensions<'_> {
     pub(crate) fn into_owned(self) -> ClientExtensions<'static> {
         let Self {
+            schedule_profiles,
             server_name,
             certificate_status_request,
             named_groups,
@@ -966,6 +987,7 @@ impl ClientExtensions<'_> {
             contiguous_extensions,
         } = self;
         ClientExtensions {
+            schedule_profiles,
             server_name: server_name.map(|x| x.into_owned()),
             certificate_status_request,
             named_groups,
@@ -1133,6 +1155,8 @@ pub(crate) struct ServerExtensionsInput<'a> {
 
 extension_struct! {
     pub(crate) struct ServerExtensions<'a> {
+        ExtensionType::ScheduleProfile =>
+            pub(crate) schedule_profile: Option<u16>,
         /// Supported EC point formats (RFC4492)
         ExtensionType::ECPointFormats =>
             pub(crate) ec_point_formats: Option<SupportedEcPointFormats>,
@@ -1208,6 +1232,7 @@ impl ServerExtensions<'_> {
             session_ticket_ack,
             renegotiation_info,
             selected_protocol,
+            schedule_profile,
             key_share,
             preshared_key,
             client_certificate_type,
@@ -1222,6 +1247,7 @@ impl ServerExtensions<'_> {
             unknown_extensions,
         } = self;
         ServerExtensions {
+            schedule_profile,
             ec_point_formats,
             server_name_ack,
             session_ticket_ack,
@@ -1401,6 +1427,8 @@ impl TlsListElement for ExtensionType {
 extension_struct! {
     /// A representation of extensions present in a `HelloRetryRequest` message
     pub(crate) struct HelloRetryRequestExtensions<'a> {
+        ExtensionType::ScheduleProfile =>
+            pub(crate) schedule_profile: Option<u16>,
         ExtensionType::KeyShare =>
             pub(crate) key_share: Option<NamedGroup>,
 
@@ -1421,6 +1449,7 @@ extension_struct! {
 impl HelloRetryRequestExtensions<'_> {
     fn into_owned(self) -> HelloRetryRequestExtensions<'static> {
         let Self {
+            schedule_profile,
             key_share,
             cookie,
             supported_versions,
@@ -1428,6 +1457,7 @@ impl HelloRetryRequestExtensions<'_> {
             order,
         } = self;
         HelloRetryRequestExtensions {
+            schedule_profile,
             key_share,
             cookie,
             supported_versions,

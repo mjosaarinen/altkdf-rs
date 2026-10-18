@@ -9,7 +9,7 @@
 # will likely look very different (and much more reasonable).
 # See Cargo.toml.orig for the original contents.
 
-# Vendored fork (draft-sullivan-tls-xof-ciphers). This empty [workspace]
+# Vendored fork (draft-sullivan-tls-xof-schedule). This empty [workspace]
 # makes the fork its own workspace root, so the parent workspace (which pulls it
 # in via `[patch.crates-io]`) treats it as external: root `cargo
 # fmt`/`clippy`/`test` skip its 100+ files. Our edits to the TLS 1.3 key schedule
@@ -142,7 +142,7 @@ features = [
 optional = true
 default-features = false
 
-# DECK-FORK (draft-sullivan-tls-xof-ciphers): the forked TLS 1.3 key
+# DECK-FORK (draft-sullivan-tls-xof-schedule): the forked TLS 1.3 key
 # schedule (src/tls13/key_schedule.rs) calls into the reference deck schedule.
 [dependencies.deck-schedule]
 path = "../../deck-schedule"

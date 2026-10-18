@@ -1,23 +1,6 @@
-//! Live TLS 1.3 handshake authenticated by an **out-of-band external PSK** on a
-//! deck cipher suite (draft §10), end to end over two forked rustls peers.
-//!
-//! The client imports an external PSK (`epsk` + `external_identity`) for its
-//! target deck suite into an `ipsk` (draft §5.9), offers the serialized
-//! `ImportedIdentityV2` as the `PskIdentity.identity`, and computes the
-//! **external** PSK binder (`"ext binder"`, draft §5.5). The server, configured
-//! with the same external PSK, re-imports it for the suite it selects, matches
-//! the offered identity, verifies the external binder, and completes a 1-RTT
-//! PSK + (EC)DHE handshake — **no server Certificate** (the PSK authenticates).
-//!
-//! This exercises the parts of the deck external-PSK path that the derivation/
-//! encoding tests (`deck-schedule`) cannot: the live wire offer, the server-side
-//! import + identity match, the external binder over the real (truncated)
-//! ClientHello transcript, and the imported `ipsk` keying the early stage.
-//!
-//! Two tests: [`external_psk_handshake_succeeds`] (the happy path) and
-//! [`external_psk_wrong_secret_fails_binder`] (a server provisioned with a
-//! different `epsk` computes a different `ipsk`, so the binder does not verify
-//! and the handshake is rejected — proving the binder is genuinely checked).
+//! Live imported external PSKs using RFC 9258 ImportedIdentity and the ibk
+//! binder. Successful authentication and wrong-secret rejection are both tested.
+//! negotiation.rs also covers HRR and changing AEADs under the same KDF.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -78,7 +61,7 @@ fn external_psk_client_config(psk: DeckExternalPsk) -> Arc<ClientConfig> {
     Arc::new(config)
 }
 
-/// A deck server config that accepts `psks` as external PSKs (draft §10).
+/// A deck server config that accepts `psks` as external PSKs (draft `[psk-importer]`).
 fn external_psk_server_config(
     certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
@@ -117,7 +100,7 @@ fn external_psk_handshake_succeeds() {
 
     drive_handshake(&mut client, &mut server).expect("external-PSK handshake completes");
 
-    // The external binder (draft §5.5) verified: the handshake is a PSK
+    // The external binder (draft [finished-and-binder-mac]) verified: the handshake is a PSK
     // resumption, 1-RTT, on both peers.
     assert_eq!(
         client.handshake_kind(),
@@ -131,7 +114,7 @@ fn external_psk_handshake_succeeds() {
     );
 
     // A PSK handshake sends no server Certificate — the PSK authenticates
-    // (draft §10; RFC 8446 §2.2). So the client sees no peer certificate.
+    // (draft [psk-importer]; RFC 8446 §2.2). So the client sees no peer certificate.
     assert!(
         client.peer_certificates().is_none(),
         "external-PSK handshake carries no server certificate",
@@ -140,7 +123,7 @@ fn external_psk_handshake_succeeds() {
     // Negotiated on a deck suite (the target suite the identity bound).
     let suite = u16::from(client.negotiated_cipher_suite().unwrap().suite());
     assert!(
-        (0xFF01..=0xFF05).contains(&suite),
+        (0x1301..=0x1303).contains(&suite),
         "negotiated a deck suite ({suite:#06x})",
     );
 
@@ -171,7 +154,7 @@ fn external_psk_wrong_secret_fails_binder() {
     let mut client = ClientConnection::new(client_config, name()).unwrap();
     let mut server = ServerConnection::new(server_config).unwrap();
 
-    // The server must reject the mismatched binder (draft §5.5): the handshake
+    // The server must reject the mismatched binder (draft [finished-and-binder-mac]): the handshake
     // fails rather than completing or silently falling back.
     let result = drive_handshake(&mut client, &mut server);
     assert!(

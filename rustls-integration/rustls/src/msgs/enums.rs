@@ -107,6 +107,8 @@ enum_builder! {
     /// The `Unknown` item is used when processing unrecognised ordinals.
     #[repr(u16)]
     pub enum ExtensionType {
+        // DECK-FORK: experimental private-use schedule_profile, not an IANA assignment.
+        ScheduleProfile => 0xffa6,
         ServerName => 0x0000,
         MaxFragmentLength => 0x0001,
         ClientCertificateUrl => 0x0002,

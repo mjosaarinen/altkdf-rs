@@ -1,28 +1,6 @@
-//! Live loopback handshake on a deck cipher suite.
-//!
-//! Two forked-rustls endpoints — both on the deck [`CryptoProvider`] — complete
-//! a no-PSK 1-RTT TLS 1.3 handshake over an in-memory transport and exchange
-//! application data in both directions. This is the end-to-end proof that the
-//! deck key schedule (draft §7.3) wired into rustls is self-consistent:
-//!
-//! * A successful **Finished** exchange proves both peers derived identical
-//!   handshake traffic secrets and the same deck `TranscriptHash` (draft §2.1,
-//!   §5.5) — a mismatch is a `decrypt_error` alert, not a passing test.
-//! * Decrypting **application data** each way proves identical application
-//!   traffic secrets and record keys (draft §5.3).
-//! * The negotiated suite is one of `0xFF01..=0xFF05`, confirming that rustls
-//!   carries and selects the private-use code points as `CipherSuite::Unknown`
-//!   values.
-//!
-//! The key exchange is whatever the deck provider prefers first — pure
-//! **ML-KEM768** (draft-ietf-tls-mlkem), the clean single-`Absorb("dh", …)` path
-//! (draft §7.3) — so this also exercises the post-quantum key exchange the design
-//! targets.
-//!
-//! Certificate verification is out of scope for the draft (draft §15.5); the
-//! client uses an accept-any verifier that still delegates the real TLS 1.3
-//! CertificateVerify signature check to the provider, so the signature over the
-//! deck transcript hash is genuinely validated.
+//! Live 1-RTT handshakes for both XOF KDFs over the three backend AEADs.
+//! Finished, CertificateVerify and bidirectional application data exercise the
+//! negotiated transcript and schedule, with pure ML-KEM768 by default.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -162,10 +140,10 @@ fn client_config_on(provider: CryptoProvider) -> ClientConfig {
 }
 
 /// Full handshake through the **public** `deck_server_config` / `deck_client_config`
-/// helpers, offering all five deck suites. rustls selects in **client order** by
+/// helpers, offering all six AEAD/KDF pairs. rustls selects in **client order** by
 /// default (`ignore_client_order = false`), and both peers list the suites in the
-/// same `0xFF01..=0xFF05` order, so the first-offered `0xFF01`
-/// (`TLS_AES_128_GCM_TURBOSHAKE256`) is negotiated.
+/// same `0x1301..=0x1303` order, so the first-offered `0x1301`
+/// (`TLS_AES_128_GCM_SHA256 + TLS13_TURBOSHAKE256`) is negotiated.
 #[test]
 fn loopback_public_helpers_negotiate_first_deck_suite() {
     let (certs, key) = self_signed();
@@ -175,7 +153,7 @@ fn loopback_public_helpers_negotiate_first_deck_suite() {
     let suite = drive(client, server);
     assert_eq!(
         u16::from(suite),
-        0xFF01,
+        0x1301,
         "first-offered deck suite is negotiated (client order)",
     );
 }
@@ -183,7 +161,7 @@ fn loopback_public_helpers_negotiate_first_deck_suite() {
 /// The deck provider's first key-exchange group is pure ML-KEM768
 /// (draft-ietf-tls-mlkem), so a default handshake actually runs the
 /// post-quantum key exchange the design targets: one KEM shared secret absorbed
-/// as a single `Absorb("dh", …)` (draft §7.3), no hybrid ordering.
+/// as a single `Absorb("shs_", …)` (draft `[key-schedule]`), no hybrid ordering.
 #[test]
 fn loopback_uses_pure_mlkem768_key_exchange() {
     use rustls::NamedGroup;
@@ -200,24 +178,30 @@ fn loopback_uses_pure_mlkem768_key_exchange() {
     );
 }
 
-/// Each of the five deck suites completes a handshake on its own (both profiles,
+/// Each of the six AEAD/KDF pairs completes a handshake on its own (both profiles,
 /// all three AEADs), confirming the code point negotiates and the profile the
-/// fork routes it to (draft §6, Table 1) produces working record keys.
+/// fork routes it to (draft `[cipher-suites]`, Table 1) produces working record keys.
 #[test]
 fn loopback_each_deck_suite() {
-    for reference in deck_schedule::suites::ALL {
-        let cp = reference.code_point;
-        let only: Vec<SupportedCipherSuite> = deck_provider()
-            .cipher_suites
-            .into_iter()
-            .filter(|cs| u16::from(cs.suite()) == cp)
-            .collect();
-        assert_eq!(only.len(), 1, "exactly one suite for {}", reference.name);
-
-        let server = server_config_on(provider_with(only.clone()));
-        let client = client_config_on(provider_with(only));
-        let got = drive(client, server);
-        assert_eq!(u16::from(got), cp, "negotiated {}", reference.name);
+    for suite in deck_provider().cipher_suites {
+        let cp = u16::from(suite.suite());
+        let profile = suite
+            .tls13()
+            .unwrap()
+            .common
+            .hash_provider
+            .schedule_profile();
+        let server = server_config_on(provider_with(vec![suite]));
+        let client = client_config_on(provider_with(vec![suite]));
+        let (mut c, mut s) = handshake_only(client, server);
+        assert_eq!(u16::from(c.negotiated_cipher_suite().unwrap().suite()), cp);
+        assert_eq!(c.negotiated_schedule_profile(), profile);
+        assert_eq!(s.negotiated_schedule_profile(), profile);
+        c.writer().write_all(b"each AEAD/KDF").unwrap();
+        pump!(c=>s);
+        let mut got = [0; 13];
+        s.reader().read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"each AEAD/KDF");
     }
 }
 

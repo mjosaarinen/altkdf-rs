@@ -167,6 +167,9 @@ impl HandshakeHash {
         self.client_auth.take()
     }
 
+    // DECK-FORK: do not alias different XOFs via their common SHA512 size tag.
+    pub(crate) fn schedule_profile(&self) -> Option<u16> { self.provider.schedule_profile() }
+
     /// The hashing algorithm
     pub(crate) fn algorithm(&self) -> HashAlgorithm {
         self.provider.algorithm()

@@ -190,12 +190,12 @@ pub struct ClientConfig {
     /// of `A` that the server certificate is fully validated.
     pub resumption: Resumption,
 
-    /// DECK-FORK (draft §10): an out-of-band external PSK to offer for a deck
-    /// cipher suite. When set (and no resumption ticket is offered), the client
-    /// imports it per the first offered deck suite (draft §5.9), offers the
-    /// serialized `ImportedIdentityV2` as the `PskIdentity.identity`, and computes
-    /// the `"ext binder"` (draft §5.5). Ignored by non-deck suites. `None` by
-    /// default.
+    /// DECK-FORK (draft `[psk-importer]`): an out-of-band external PSK.
+    /// When no resumption ticket is offered, the client imports it for the first
+    /// offered XOF KDF, sends its RFC 9258 `ImportedIdentity`, and uses the `ibk`
+    /// binder label (`[finished-and-binder-mac]`). HRR may retain or remove that
+    /// identity, but cannot introduce an import for another KDF. Ignored over
+    /// QUIC or without a schedule_profile offer. `None` by default.
     pub deck_external_psk: Option<Arc<crate::DeckExternalPsk>>,
 
     /// The maximum size of plaintext input to be emitted in a single TLS record.
@@ -435,6 +435,7 @@ impl ClientConfig {
             .any(|cs| cs.usable_for_protocol(proto))
     }
 
+    #[allow(dead_code)] // DECK-FORK: virtual-suite selection also checks the KDF.
     pub(super) fn find_cipher_suite(&self, suite: CipherSuite) -> Option<SupportedCipherSuite> {
         self.provider
             .cipher_suites

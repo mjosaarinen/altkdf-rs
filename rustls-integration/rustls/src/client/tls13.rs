@@ -51,6 +51,7 @@ use crate::{ConnectionTrafficSecrets, KeyLog, compress, crypto};
 
 // Extensions we expect in plaintext in the ServerHello.
 static ALLOWED_PLAINTEXT_EXTS: &[ExtensionType] = &[
+    ExtensionType::ScheduleProfile,
     ExtensionType::KeyShare,
     ExtensionType::PreSharedKey,
     ExtensionType::SupportedVersions,
@@ -117,7 +118,7 @@ pub(super) fn handle_server_hello(
             )
         })?;
 
-    // DECK-FORK (draft §10): set when the server selects an out-of-band external
+    // DECK-FORK (draft [psk-importer]): set when the server selects an out-of-band external
     // PSK we offered (as opposed to a resumption ticket) — a PSK handshake with no
     // resuming session. Threaded to `ExpectEncryptedExtensions` so it skips the
     // server Certificate like resumption does.
@@ -159,25 +160,16 @@ pub(super) fn handle_server_hello(
                     debug!("Resuming using PSK");
                     // The key schedule has been initialized and set in fill_in_psk_binder()
                 }
-                // DECK-FORK (draft §10): no resuming session, but we built an early
+                // DECK-FORK (draft [psk-importer]): no resuming session, but we built an early
                 // key schedule — we offered an out-of-band external PSK and the
                 // server selected it.
                 None => {
-                    // The external PSK is bound to one target deck suite (its
-                    // `ImportedIdentityV2.target_ciphersuite`). Enforce the deck
-                    // exact-suite rule (draft §4, §15.2): the server MUST select
-                    // that exact suite to accept the PSK. A conforming server can't
-                    // match a mismatched suite (its identity import differs), but a
-                    // PSK-knowing peer could otherwise steer us onto the PSK /
-                    // no-certificate branch under a *different* deck suite (an AEAD
-                    // downgrade), so reject it here rather than trust the identity
-                    // match alone. `deck_external_psk_suite` is `Some` exactly when
-                    // we offered an external PSK, so `None` here means the server
-                    // selected a PSK we never offered.
+                    // DECK-FORK ([governing-profile]): imported PSKs bind a KDF,
+                    // not an AEAD. A missing offer or incompatible KDF is fatal.
                     let Some(target) = deck_external_psk_suite else {
                         return Err(PeerMisbehaved::SelectedUnofferedPsk.into());
                     };
-                    if suite.common.suite != target.common.suite {
+                    if suite.can_resume_from(target).is_none() {
                         return Err(cx.common.send_fatal_alert(
                             AlertDescription::IllegalParameter,
                             PeerMisbehaved::SelectedInvalidPsk,
@@ -189,7 +181,7 @@ pub(super) fn handle_server_hello(
                             PeerMisbehaved::SelectedInvalidPsk,
                         ));
                     }
-                    debug!("Using external PSK (draft §10)");
+                    debug!("Using external PSK (draft [psk-importer])");
                     accepted_external_psk = true;
                 }
             }
@@ -205,6 +197,11 @@ pub(super) fn handle_server_hello(
         }
     };
 
+    if is_deck_suite(suite) && matches!(their_key_share.group,
+        crate::NamedGroup::X25519MLKEM768|crate::NamedGroup::secp256r1MLKEM768) {
+        return Err(cx.common.send_fatal_alert(AlertDescription::HandshakeFailure,
+            Error::General("XOF hybrid component extraction is not implemented".into())));
+    }
     cx.common.kx_state.complete();
     let shared_secret = our_key_share
         .complete(&their_key_share.payload.0)
@@ -378,7 +375,7 @@ pub(super) fn fill_in_psk_binder(
     hmp: &mut HandshakeMessagePayload<'_>,
 ) -> KeyScheduleEarly {
     // We need the hash function of the suite we're offering the PSK for.
-    // DECK-FORK (draft §10): `secret`/`binder_kind` are the resumption PSK +
+    // DECK-FORK (draft [psk-importer]): `secret`/`binder_kind` are the resumption PSK +
     // "res binder" when resuming, or the imported `ipsk` + "ext binder" for an
     // external PSK — the offer is identical here bar those two inputs.
     let suite_hash = suite.common.hash_provider;
@@ -390,7 +387,7 @@ pub(super) fn fill_in_psk_binder(
 
     // Run a fake key_schedule to simulate what the server will do if it chooses
     // to accept the PSK.
-    let key_schedule = KeyScheduleEarly::new(suite, secret);
+    let key_schedule = KeyScheduleEarly::new(suite, secret, binder_kind);
     let real_binder =
         key_schedule.psk_binder_key_and_sign_verify_data(&handshake_hash, binder_kind);
 
@@ -425,7 +422,7 @@ pub(super) fn prepare_resumption(
     // The EarlyData extension MUST be supplied together with the
     // PreSharedKey extension.
     let max_early_data_size = resuming_session.max_early_data_size();
-    // DECK-FORK (draft §11): deck suites defer 0-RTT, so a deck client never
+    // DECK-FORK (draft [zero-rtt]): deck suites defer 0-RTT, so a deck client never
     // offers early data — it resumes at 1-RTT, never reaching the unimplemented
     // deck early-traffic secret.
     if config.enable_early_data
@@ -524,7 +521,7 @@ fn validate_encrypted_extensions(
 struct ExpectEncryptedExtensions {
     config: Arc<ClientConfig>,
     resuming_session: Option<persist::Tls13ClientSessionValue>,
-    /// DECK-FORK (draft §10): the server accepted an out-of-band external PSK we
+    /// DECK-FORK (draft `[psk-importer]`): the server accepted an out-of-band external PSK we
     /// offered (there is no `resuming_session`, but it is still a PSK handshake).
     accepted_external_psk: bool,
     server_name: ServerName<'static>,
@@ -649,7 +646,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     ech_retry_configs,
                 }))
             }
-            // DECK-FORK (draft §10): the server accepted an out-of-band external
+            // DECK-FORK (draft [psk-importer]): the server accepted an out-of-band external
             // PSK. Like resumption this is a PSK handshake with no server
             // Certificate — the PSK authenticates — but there is no prior session,
             // so `peer_certificates` stays `None`. Deck 0-RTT is off, so there is

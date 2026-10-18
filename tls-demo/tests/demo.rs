@@ -1,8 +1,8 @@
 //! Wire verification: a live deck TLS 1.3 handshake over a **real TCP loopback**
 //! (not the in-memory transport used by `rustls-integration`), exercising ALPN, a
-//! two-way echo across a record boundary, a live KeyUpdate (draft §5.4), the
-//! exporter (draft §5.6), and a key-log cross-check that both peers derived
-//! identical deck secrets (draft §2.1, §5.3, §7.3).
+//! two-way echo across a record boundary, a live KeyUpdate (draft `[key-update-generic]`), the
+//! exporter (draft `[exporters-generic]`), and a key-log cross-check that both peers derived
+//! identical deck secrets (draft `[transcript-hash]`, `[record-keys-generic]`, `[key-schedule]`).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -102,7 +102,7 @@ fn live_socket_handshake_keyupdate_exporter_and_keylog_crosscheck() {
     // Round 1 echo.
     assert_eq!(send_recv(&mut conn, &mut sock, MSG1), MSG1, "round 1 echo");
 
-    // Live KeyUpdate (draft §5.4), then round 2 across a record boundary.
+    // Live KeyUpdate (draft [key-update-generic]), then round 2 across a record boundary.
     conn.refresh_traffic_keys().expect("key update");
     let big = big_msg();
     assert_eq!(
@@ -125,7 +125,7 @@ fn live_socket_handshake_keyupdate_exporter_and_keylog_crosscheck() {
     // --- negotiation agreement ---
     assert_eq!(client_suite, server_report.suite, "same negotiated suite");
     assert!(
-        (0xFF01..=0xFF05).contains(&client_suite),
+        (0x1301..=0x1303).contains(&client_suite),
         "negotiated a deck suite, got {client_suite:#06x}",
     );
     assert_eq!(client_alpn.as_deref(), Some(DEMO_ALPN), "client ALPN");
@@ -135,7 +135,7 @@ fn live_socket_handshake_keyupdate_exporter_and_keylog_crosscheck() {
         "server ALPN"
     );
 
-    // --- exporter agreement (draft §5.6) ---
+    // --- exporter agreement (draft [exporters-generic]) ---
     assert_eq!(
         client_exporter, server_report.exporter,
         "both peers derive the same exported keying material",

@@ -525,7 +525,7 @@ impl EchState {
         confirmation_transcript.add_message(&Self::hello_retry_request_conf(hrr));
 
         let derived = server_ech_hrr_confirmation_secret(
-            cs.hkdf_provider,
+            cs,
             &self.inner_hello_random.0,
             confirmation_transcript.current_hash(),
         )?;

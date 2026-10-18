@@ -111,29 +111,28 @@ mod client_hello {
                 .transcript
                 .hash_given(binder_plaintext);
 
-            let key_schedule = KeyScheduleEarly::new(suite, psk);
+            let key_schedule = KeyScheduleEarly::new(suite, psk, binder_kind);
             let real_binder =
                 key_schedule.psk_binder_key_and_sign_verify_data(&handshake_hash, binder_kind);
 
             ConstantTimeEq::ct_eq(real_binder.as_ref(), binder).into()
         }
 
-        /// DECK-FORK (draft §10): does `offered_identity` match a configured
-        /// out-of-band external PSK for our selected suite? Returns the imported
-        /// `ipsk` (draft §5.9) if so. The offered identity is the serialized
-        /// `ImportedIdentityV2`, which encodes `target_ciphersuite`, so a match can
-        /// only occur when the server selected that same suite — the exact-suite
-        /// rule (draft §4, §15.2) holds by construction.
+        /// DECK-FORK (draft `[psk-importer]`): does `offered_identity` match a configured
+        /// out-of-band external PSK for our selected KDF? Returns the imported
+        /// `ipsk` (draft `[import-derivation]`) if so. The offered identity is the serialized
+        /// `ImportedIdentity`, which encodes `target_kdf`, not an AEAD. A match
+        /// therefore enforces KDF compatibility (`[governing-profile]`).
         fn deck_external_ipsk(&self, offered_identity: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
             if !is_deck_suite(self.suite) {
                 return None;
             }
-            let suite_code = u16::from(self.suite.common.suite);
+            let kdf_id = self.suite.common.hash_provider.schedule_profile()?;
             self.config
                 .deck_external_psks
                 .iter()
                 .find_map(|epsk| {
-                    let (identity, ipsk) = epsk.import_for(suite_code)?;
+                    let (identity, ipsk) = epsk.import_for(kdf_id)?;
                     (identity == offered_identity).then_some(ipsk)
                 })
         }
@@ -274,6 +273,7 @@ mod client_hello {
             };
 
             let mut chosen_psk_index = None;
+            let mut selected_binder_kind=DeckBinderKind::Resumption;
             let mut resumedata = None;
 
             if let Some(psk_offer) = &client_hello.preshared_key_offer {
@@ -308,12 +308,12 @@ mod client_hello {
                 let now = self.config.current_time()?;
 
                 for (i, psk_id) in psk_offer.identities.iter().enumerate() {
-                    // DECK-FORK (draft §10): try an out-of-band external PSK before
+                    // DECK-FORK (draft [psk-importer]): try an out-of-band external PSK before
                     // a resumption ticket. An external PSK + (EC)DHE handshake is
                     // structurally a 1-RTT resumption — same pre_shared_key +
                     // psk_dhe_ke flow, no server Certificate — differing only in the
                     // imported `ipsk` (vs a ticket's resumption_psk) and the
-                    // "ext binder" label (draft §5.5). So on a match we build a
+                    // ibk label (draft [finished-and-binder-mac]). On a match we build a
                     // synthetic ServerSessionValue keyed by the ipsk and let the
                     // ordinary resumption path drive the rest.
                     if let Some(ipsk) = self.deck_external_ipsk(&psk_id.identity.0) {
@@ -322,7 +322,7 @@ mod client_hello {
                             chm,
                             &ipsk,
                             psk_offer.binders[i].as_ref(),
-                            DeckBinderKind::External,
+                            DeckBinderKind::Imported,
                         ) {
                             return Err(cx.common.send_fatal_alert(
                                 AlertDescription::DecryptError,
@@ -338,9 +338,10 @@ mod client_hello {
                             None,        // alpn negotiated afresh
                             Vec::new(),  // no stored application data
                             now,
-                            0, // external PSKs carry no ticket age (RFC 8446 §4.2.11.1)
-                        ));
+                            0, // external PSKs carry no ticket age
+                        ).with_schedule_profile(self.suite.common.hash_provider.schedule_profile()));
                         chosen_psk_index = Some(i);
+                        selected_binder_kind=DeckBinderKind::Imported;
                         break;
                     }
 
@@ -410,6 +411,7 @@ mod client_hello {
                 resumedata
                     .as_ref()
                     .map(|x| &x.master_secret.0[..]),
+                selected_binder_kind,
                 &self.config,
             )?;
             if !self.done_retry {
@@ -553,6 +555,7 @@ mod client_hello {
         share_and_kxgroup: (&KeyShareEntry, &'static dyn SupportedKxGroup),
         chosen_psk_idx: Option<usize>,
         resuming_psk: Option<&[u8]>,
+        binder_kind: DeckBinderKind,
         config: &ServerConfig,
     ) -> Result<KeyScheduleHandshake, Error> {
         // Prepare key exchange; the caller already found the matching SupportedKxGroup
@@ -567,6 +570,7 @@ mod client_hello {
         cx.common.kx_state.complete();
 
         let extensions = Box::new(ServerExtensions {
+            schedule_profile: suite.common.hash_provider.schedule_profile(),
             key_share: Some(KeyShareEntry::new(ckx.group, ckx.pub_key)),
             selected_version: Some(ProtocolVersion::TLSv1_3),
             preshared_key: chosen_psk_idx.map(|idx| idx as u16),
@@ -597,8 +601,8 @@ mod client_hello {
 
         // Start key schedule
         let key_schedule_pre_handshake = if let Some(psk) = resuming_psk {
-            let early_key_schedule = KeyScheduleEarly::new(suite, psk);
-            // DECK-FORK (draft §11): deck suites defer 0-RTT, so the server
+            let early_key_schedule = KeyScheduleEarly::new(suite, psk, binder_kind);
+            // DECK-FORK (draft [zero-rtt]): deck suites defer 0-RTT, so the server
             // derives no client early-traffic secret / early-data decrypter on
             // resumption. Resumption is 1-RTT PSK + (EC)DHE; if a client ever
             // sent early data it is rejected via trial decryption
@@ -655,6 +659,7 @@ mod client_hello {
             session_id,
             cipher_suite: suite.common.suite,
             extensions: HelloRetryRequestExtensions {
+                schedule_profile: suite.common.hash_provider.schedule_profile(),
                 key_share: Some(group),
                 supported_versions: Some(ProtocolVersion::TLSv1_3),
                 ..Default::default()
@@ -697,7 +702,7 @@ mod client_hello {
 
         /* Non-zero max_early_data_size controls whether early_data is allowed at all.
          * We also require stateful resumption. */
-        // DECK-FORK (draft §11): deck suites defer 0-RTT, so a deck server never
+        // DECK-FORK (draft [zero-rtt]): deck suites defer 0-RTT, so a deck server never
         // accepts early data — it is rejected cleanly (trial decryption skips it),
         // never reaching the unimplemented deck early-traffic secret.
         let early_data_configured =
@@ -1316,7 +1321,7 @@ fn get_server_session_value(
         cx.data.resumption_data.clone(),
         time_now,
         age_obfuscation_offset,
-    )
+    ).with_schedule_profile(suite.common.hash_provider.schedule_profile())
 }
 
 struct ExpectFinished {

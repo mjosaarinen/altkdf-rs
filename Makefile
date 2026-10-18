@@ -5,7 +5,6 @@
 
 CARGO        ?= cargo
 CARGO_FLAGS  ?=
-PYTHON       ?= python3
 CLIPPY_ARGS  := --all-targets --all-features -- -D warnings
 # Bare-metal target with no std, to prove `deck-schedule` is genuinely no_std.
 NOSTD_TARGET ?= thumbv7em-none-eabi
@@ -43,13 +42,13 @@ doc-check: ## Strict rustdoc (warnings-as-errors), incl. deck-schedule --all-fea
 	RUSTDOCFLAGS='-D warnings' $(CARGO) doc --no-deps
 	RUSTDOCFLAGS='-D warnings' $(CARGO) doc -p deck-schedule --no-deps --all-features
 
-vectors: ## Regenerate deck-schedule/vectors/*.json (Appendix C deck + Appendix D FIPS)
+vectors: ## Emit independent Rust appendix values as name/hex pairs
 	$(CARGO) run $(CARGO_FLAGS) -p deck-schedule --example gen_vectors
 
-reproduce: ## Independently reproduce the vectors (draft App. C + App. D gate)
-	$(PYTHON) deck-schedule/vectors/reproduce.py
+reproduce: ## Compare all 162 independent Rust values against the combined draft
+	$(CARGO) test -p deck-schedule --test vectors
 
-bench: ## Appendix A.1 permutation-count benchmark (deck vs HKDF-SHA3-256)
+bench: ## Schedule-only count: 15/23 vs HKDF-SHA3-256 30/120
 	$(CARGO) run $(CARGO_FLAGS) -p deck-schedule --example invocations --features bench
 
 no-std: ## Build deck-schedule as no_std for a bare-metal target (regression guard)
@@ -62,7 +61,7 @@ clean: ## cargo clean + remove demo capture artifacts
 	$(CARGO) clean
 	@find . -type f \( -name '*.keylog' -o -name '*.pcap' -o -name '*.pcapng' \) \
 		-not -path './.git/*' -delete
-	@echo "cleaned: target/ and capture artifacts (doc/ references untouched)"
+	@echo "cleaned: target/ and capture artifacts"
 
 distclean: clean ## clean + drop Cargo.lock (back to pristine sources)
 	@rm -f Cargo.lock

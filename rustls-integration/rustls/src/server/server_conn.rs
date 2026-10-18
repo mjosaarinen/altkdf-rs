@@ -303,12 +303,13 @@ pub struct ServerConfig {
     /// which is supported by the client.
     pub ignore_client_order: bool,
 
-    /// DECK-FORK (draft §10): out-of-band external PSKs this server accepts. On a
-    /// deck suite, before trial-decrypting a PSK identity as a resumption ticket,
-    /// the server imports each of these for its selected suite (draft §5.9) and
+    /// DECK-FORK (draft `[psk-importer]`): external PSKs this server accepts.
+    /// With an XOF KDF, before trial-decrypting an identity as a resumption ticket,
+    /// the server imports each PSK for the selected KDF (`[import-derivation]`) and
     /// matches the offered `PskIdentity.identity` against the serialized
-    /// `ImportedIdentityV2`; a match verifies the `"ext binder"` (draft §5.5) and
-    /// resumes at 1-RTT. Empty by default.
+    /// RFC 9258 `ImportedIdentity`. A match verifies the `ibk` binder
+    /// (`[finished-and-binder-mac]`) and establishes a 1-RTT PSK handshake.
+    /// The import binds the KDF, not the AEAD. Empty by default.
     pub deck_external_psks: Vec<Arc<crate::DeckExternalPsk>>,
 
     /// The maximum size of plaintext input to be emitted in a single TLS record.

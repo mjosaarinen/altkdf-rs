@@ -436,6 +436,7 @@ mod conn;
 pub mod crypto;
 // DECK-FORK (draft §10): out-of-band external PSKs for deck cipher suites.
 mod deck_psk;
+pub mod schedule_profile;
 mod error;
 mod hash_hs;
 #[cfg(any(feature = "std", feature = "hashbrown"))]

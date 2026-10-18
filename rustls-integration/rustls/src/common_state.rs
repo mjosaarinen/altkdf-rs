@@ -152,6 +152,12 @@ impl CommonState {
     /// Retrieves the ciphersuite agreed with the peer.
     ///
     /// This returns None until the ciphersuite is agreed.
+    /// DECK-FORK: selected TLS KDF Identifier; None means ordinary HKDF.
+    pub fn negotiated_schedule_profile(&self) -> Option<u16> {
+        self.suite.and_then(|s|s.hash_provider().schedule_profile())
+    }
+
+    /// The selected AEAD cipher suite, if negotiation has reached ServerHello.
     pub fn negotiated_cipher_suite(&self) -> Option<SupportedCipherSuite> {
         self.suite
     }

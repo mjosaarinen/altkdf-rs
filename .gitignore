@@ -26,21 +26,15 @@ Thumbs.db
 *.tmp
 *.log
 
-# ---- Python (vectors/reproduce.py) ----
+# ---- Python ----
 __pycache__/
 *.pyc
 
-# ---- TLS demo capture artifacts (Stage 5) ----
+# ---- TLS demo capture artifacts ----
 *.keylog
 sslkeylog*.txt
 *.pcap
 *.pcapng
 
-# ---- Reference documents (doc/) ----
-# The reference RFCs / NIST PDFs / IACR papers under doc/ are fetched, large
-# (~20 MB total), and freely re-downloadable. They are TRACKED by default so the
-# working set is self-contained. To keep them out of git instead, uncomment:
-#   doc/*.pdf
-#   doc/RFC*.txt
-# The I-D itself (doc/draft-*.txt) is never matched by those globs, so it always
-# stays tracked.
+# ---- Reference documents ----
+/doc/

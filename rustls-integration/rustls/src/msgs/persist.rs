@@ -301,6 +301,7 @@ pub struct ServerSessionValue {
     pub(crate) sni: Option<DnsName<'static>>,
     pub(crate) version: ProtocolVersion,
     pub(crate) cipher_suite: CipherSuite,
+    pub(crate) schedule_profile: Option<u16>,
     pub(crate) master_secret: Zeroizing<PayloadU8>,
     pub(crate) extended_ms: bool,
     pub(crate) client_cert_chain: Option<CertificateChain<'static>>,
@@ -322,6 +323,7 @@ impl Codec<'_> for ServerSessionValue {
         }
         self.version.encode(bytes);
         self.cipher_suite.encode(bytes);
+        if self.version==ProtocolVersion::TLSv1_3 { self.schedule_profile.unwrap_or(0).encode(bytes); }
         self.master_secret.encode(bytes);
         (u8::from(self.extended_ms)).encode(bytes);
         if let Some(chain) = &self.client_cert_chain {
@@ -358,6 +360,7 @@ impl Codec<'_> for ServerSessionValue {
 
         let v = ProtocolVersion::read(r)?;
         let cs = CipherSuite::read(r)?;
+        let schedule_profile=if v==ProtocolVersion::TLSv1_3 { match u16::read(r)? {0=>None,n=>Some(n)} } else {None};
         let ms = Zeroizing::new(PayloadU8::read(r)?);
         let ems = u8::read(r)?;
         let has_ccert = u8::read(r)? == 1;
@@ -380,6 +383,7 @@ impl Codec<'_> for ServerSessionValue {
             sni,
             version: v,
             cipher_suite: cs,
+            schedule_profile,
             master_secret: ms,
             extended_ms: ems == 1u8,
             client_cert_chain: ccert,
@@ -393,6 +397,7 @@ impl Codec<'_> for ServerSessionValue {
 }
 
 impl ServerSessionValue {
+    pub(crate) fn with_schedule_profile(mut self, profile: Option<u16>) -> Self { self.schedule_profile=profile; self }
     pub(crate) fn new(
         sni: Option<&DnsName<'_>>,
         v: ProtocolVersion,
@@ -409,6 +414,7 @@ impl ServerSessionValue {
             version: v,
             cipher_suite: cs,
             master_secret: Zeroizing::new(PayloadU8::new(ms.to_vec())),
+            schedule_profile: None,
             extended_ms: false,
             client_cert_chain,
             alpn: alpn.map(|p| PayloadU8::new(p.as_ref().to_vec())),

@@ -1,13 +1,15 @@
-//! The Keccak sponge shared by both profiles (draft §8.1, §9.1).
+//! The Keccak sponge shared by both KDFs (draft `[turboshake-instantiation]`, `[shake-instantiation]`).
 //!
 //! A single sponge with a 136-octet rate and a 512-bit capacity, parameterized
 //! by round count (12 or 24) and the domain-separation byte. This is the one
-//! primitive the whole schedule is built on: `DF(S, L)` uses domain `0x1F`
-//! (draft §8.1/§9.1), and `MAC` uses domain `0x04` (draft §5.2).
+//! primitive the whole schedule is built on: `DF(S, L)`, the MAC (itself a
+//! Derive) and `TranscriptHash` all use the padding byte `0x1F` — TurboSHAKE256
+//! with D = 0x1F and SHAKE256 pad identically, and differ only in round count.
 //!
-//! Cloning an *unfinalized* state realizes the deck `Fork` (draft §7.1, §8.1.1);
-//! `#[derive(Clone)]` gives that. Absorbing after a squeeze is forbidden by the
-//! draft and rejected here with a hard `assert!` (enforced in release too).
+//! Cloning an *unfinalized* state is the "incremental input to two separate
+//! invocations" the draft's Required API Surface permits; `#[derive(Clone)]`
+//! gives that. Absorbing after a squeeze never occurs in the draft and is
+//! rejected here with a hard `assert!` (enforced in release too).
 
 use alloc::{vec, vec::Vec};
 
@@ -18,11 +20,10 @@ use crate::keccak::keccak_p;
 /// Sponge rate in octets (draft §5.2, §8.1, §9.1).
 pub const RATE: usize = 136;
 
-/// Domain byte for deck / transcript output: `DF` and `TranscriptHash` (draft §8.1, §9.1).
+/// Padding / domain byte for every use: `DF`, MAC and `TranscriptHash`
+/// (draft `[turboshake-instantiation]`, `[shake-instantiation]`). SHAKE256's `1111` suffix and TurboSHAKE256's default
+/// D = 0x1F give the same octet.
 pub const DOMAIN_DECK: u8 = 0x1F;
-
-/// Domain byte for the MAC (draft §5.2).
-pub const DOMAIN_MAC: u8 = 0x04;
 
 #[derive(Clone)]
 pub struct Sponge {
@@ -49,11 +50,14 @@ impl Sponge {
         }
     }
 
-    /// Absorb `data`. MUST NOT be called after squeezing has begun (draft §7.1.1).
+    /// Absorb `data`. MUST NOT be called after squeezing has begun (draft `[turboshake-instantiation]`).
     /// This is a hard invariant (`assert!`, enforced in release too): `Sponge`
     /// is a public primitive, so the illegal transition must never be reachable.
     pub fn absorb(&mut self, data: &[u8]) {
-        assert!(!self.squeezing, "absorb after squeeze (draft §7.1.1)");
+        assert!(
+            !self.squeezing,
+            "absorb after squeeze (draft [turboshake-instantiation])"
+        );
         for &b in data {
             self.state[self.pos] ^= b;
             self.pos += 1;
@@ -103,14 +107,14 @@ impl Sponge {
             self.state[8 * i..8 * i + 8].copy_from_slice(&lane.to_le_bytes());
         }
         // The lane copy and the byte scratch both transiently hold secret
-        // capacity; erase them before they leave the stack frame (draft §15.7.2.2).
+        // capacity; erase them before they leave the stack frame (draft `[erasure-boundaries]`).
         lanes.zeroize();
         buf.zeroize();
     }
 }
 
 /// The 200-octet state holds the withheld capacity — the secret the erasure
-/// argument of draft §15.7.2.2 relies on — so it is zeroized on drop.
+/// argument of draft `[erasure-boundaries]` relies on — so it is zeroized on drop.
 impl Drop for Sponge {
     fn drop(&mut self) {
         self.state.zeroize();
@@ -151,7 +155,7 @@ mod tests {
     }
 
     /// `ptn(n)`: the RFC 9861 pattern `00 01 02 .. F9 FA` (251 octets) repeated
-    /// and truncated to `n` octets, i.e. `ptn[i] = i mod 251` (RFC 9861 §A).
+    /// and truncated to `n` octets, i.e. `ptn`[i]` = i mod 251` (RFC 9861 §A).
     fn ptn(n: usize) -> Vec<u8> {
         (0..n).map(|i| (i % 251) as u8).collect()
     }

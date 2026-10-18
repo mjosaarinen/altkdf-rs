@@ -1,17 +1,5 @@
-//! TLS 1.3 session resumption on a deck cipher suite (no 0-RTT).
-//!
-//! A first handshake completes fully and the server issues a NewSessionTicket
-//! (the resumption PSK is `resumption_psk(res_master, …)`, draft §5.7). A second
-//! handshake with the same client config offers that ticket; the client computes
-//! and the server verifies the **deck PSK binder** (draft §5.5) — the derivation
-//! that previously failed closed — and the connection resumes (PSK + (EC)DHE,
-//! 1-RTT). This exercises the binder end to end and the exact-suite resumption
-//! rule (draft §4, §15.2).
-//!
-//! Two tests: [`deck_session_resumption_full_then_resumed`] builds explicit
-//! tickets-on configs (documenting the knobs), and [`resumption_via_public_helpers`]
-//! uses the public `deck_server_config` / `deck_client_config` helpers, whose
-//! deck default is 1-RTT resumption on with 0-RTT off.
+//! Full then resumed 1-RTT handshakes through explicit and helper configs.
+//! These tests retain the AEAD; negotiation.rs tests cross-AEAD compatibility.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -125,7 +113,7 @@ fn deck_session_resumption_full_then_resumed() {
     );
     assert!(
         c1.tls13_tickets_received() >= 1,
-        "server issued a NewSessionTicket (resumption_psk, draft §5.7)",
+        "server issued a NewSessionTicket (resumption_psk, draft [expand-op])",
     );
     let first_suite = u16::from(c1.negotiated_cipher_suite().unwrap().suite());
 
@@ -134,7 +122,7 @@ fn deck_session_resumption_full_then_resumed() {
     let mut s2 = ServerConnection::new(server_config.clone()).unwrap();
     drive_handshake(&mut c2, &mut s2);
 
-    // The deck PSK binder (draft §5.5) was computed by the client and verified by
+    // The deck PSK binder (draft [finished-and-binder-mac]) was computed by the client and verified by
     // the server: before this landed, either side would have panicked closed.
     assert_eq!(
         c2.handshake_kind(),
@@ -147,7 +135,7 @@ fn deck_session_resumption_full_then_resumed() {
         "server accepted the resumption PSK",
     );
 
-    // Exact-suite resumption (draft §4, §15.2): the resumed suite equals the
+    // Same-AEAD resumption (draft [governing-profile], [governing-profile]): the resumed suite equals the
     // ticket's recorded suite, and it is a deck suite.
     let resumed_suite = u16::from(c2.negotiated_cipher_suite().unwrap().suite());
     assert_eq!(
@@ -155,7 +143,7 @@ fn deck_session_resumption_full_then_resumed() {
         "resumed under the recorded suite"
     );
     assert!(
-        (0xFF01..=0xFF05).contains(&resumed_suite),
+        (0x1301..=0x1303).contains(&resumed_suite),
         "resumed on a deck suite ({resumed_suite:#06x})",
     );
 

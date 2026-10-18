@@ -52,7 +52,18 @@ pub(super) fn can_resume(
     //
     // RFC 8446: "The server MUST ensure that it selects
     // a compatible PSK (if any) and cipher suite."
-    resumedata.cipher_suite == suite.suite()
+    // DECK-FORK ([governing-profile]): XOF PSKs bind a KDF, not an AEAD.
+    // Without schedule_profile, retain upstream's exact-suite policy.
+    (if suite.version().version == ProtocolVersion::TLSv1_3 {
+        let current = suite.hash_provider().schedule_profile();
+        if current.is_some() || resumedata.schedule_profile.is_some() {
+            current == resumedata.schedule_profile
+        } else {
+            resumedata.cipher_suite == suite.suite()
+        }
+    } else {
+        resumedata.cipher_suite == suite.suite()
+    })
         && (resumedata.extended_ms == using_ems || (resumedata.extended_ms && !using_ems))
         && &resumedata.sni == sni
 }
@@ -454,6 +465,17 @@ impl ExpectClientHello {
         };
         let certkey = ActiveCertifiedKey::from_certified_key(&certkey);
 
+        // DECK-FORK ([cipher-suites]): select the KDF before hashing CH.
+        let selected_profile = if version==ProtocolVersion::TLSv1_3 {
+            client_hello.schedule_profiles.as_ref().and_then(|offer| {
+                let supported=crate::schedule_profile::profiles(&self.config.provider);
+                offer.0.iter().find(|id|supported.contains(id)).copied()
+            })
+        } else { None };
+        if self.done_retry && cx.common.negotiated_schedule_profile()!=selected_profile {
+            return Err(cx.common.send_fatal_alert(AlertDescription::IllegalParameter,
+                Error::General("schedule_profile changed after HRR".into())));
+        }
         let (suite, skxg) = self
             .choose_suite_and_kx_group(
                 version,
@@ -464,6 +486,7 @@ impl ExpectClientHello {
                     .as_deref()
                     .unwrap_or_default(),
                 &client_hello.cipher_suites,
+                selected_profile,
             )
             .map_err(|incompat| {
                 cx.common
@@ -479,7 +502,7 @@ impl ExpectClientHello {
         let transcript = match self.transcript {
             HandshakeHashOrBuffer::Buffer(inner) => inner.start_hash(starting_hash),
             HandshakeHashOrBuffer::Hash(inner)
-                if inner.algorithm() == starting_hash.algorithm() =>
+                if inner.algorithm() == starting_hash.algorithm() && inner.schedule_profile()==starting_hash.schedule_profile() =>
             {
                 inner
             }
@@ -537,6 +560,7 @@ impl ExpectClientHello {
         protocol: Protocol,
         client_groups: &[NamedGroup],
         client_suites: &[CipherSuite],
+        selected_profile: Option<u16>,
     ) -> Result<(SupportedCipherSuite, &'static dyn SupportedKxGroup), PeerIncompatible> {
         // Determine which `KeyExchangeAlgorithm`s are theoretically possible, based
         // on the offered and supported groups.
@@ -552,7 +576,9 @@ impl ExpectClientHello {
                 .kx_groups
                 .iter()
                 .find(|skxg| {
-                    skxg.usable_for_version(selected_version) && skxg.name() == *offered_group
+                    // DECK-FORK ([key-schedule]): backend flattens hybrid secrets.
+                    let hybrid=matches!(skxg.name(),NamedGroup::X25519MLKEM768|NamedGroup::secp256r1MLKEM768);
+                    !(selected_profile.is_some() && hybrid) && skxg.usable_for_version(selected_version) && skxg.name() == *offered_group
                 });
 
             match offered_group.key_exchange_algorithm() {
@@ -593,6 +619,7 @@ impl ExpectClientHello {
             .cipher_suites
             .iter()
             .filter(|suite| {
+                if suite.hash_provider().schedule_profile()!=selected_profile { return false; }
                 // Reduce our supported ciphersuites by the certified key's algorithm.
                 suite.usable_for_signature_algorithm(sig_key_algorithm)
                 // And version

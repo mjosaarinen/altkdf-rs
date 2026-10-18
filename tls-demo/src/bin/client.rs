@@ -1,8 +1,8 @@
-//! Deck TLS 1.3 demo **client** (draft-sullivan-tls-xof-ciphers-00).
+//! Deck TLS 1.3 demo **client** (draft-sullivan-tls-xof-schedule).
 //!
 //! Connects to `127.0.0.1:<port>` (default 4443), completes a TLS 1.3 handshake
 //! on a deck cipher suite, sends a line and prints the echo, then prints an
-//! exported keying-material value (draft §5.6). Honors `SSLKEYLOGFILE`.
+//! exported keying-material value (draft `[exporters-generic]`). Honors `SSLKEYLOGFILE`.
 //!
 //! Usage: `SSLKEYLOGFILE=keys.log cargo run -p tls-demo --bin deck-client -- [port]`
 
@@ -38,6 +38,11 @@ fn main() {
     if let Some(cs) = conn.negotiated_cipher_suite() {
         println!("suite: {:#06x}", u16::from(cs.suite()));
     }
+    println!(
+        "  kdf: {:?}",
+        conn.negotiated_schedule_profile()
+            .map(|k| format!("{k:#06x}"))
+    );
     if let Some(g) = conn.negotiated_key_exchange_group() {
         println!("group: {:?}", g.name());
     }
@@ -47,7 +52,7 @@ fn main() {
             .map(|a| String::from_utf8_lossy(a).into_owned()),
     );
 
-    // Exported keying material (draft §5.6): keyed by the exporter master secret.
+    // Exported keying material (draft [exporters-generic]): keyed by the exporter master secret.
     let exported = conn
         .export_keying_material([0u8; 32], b"deck-demo exporter", Some(b"context"))
         .expect("export_keying_material");
