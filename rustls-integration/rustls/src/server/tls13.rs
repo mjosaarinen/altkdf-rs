@@ -567,6 +567,12 @@ mod client_hello {
                 cx.common
                     .send_fatal_alert(AlertDescription::IllegalParameter, err)
             })?;
+        if is_deck_suite(suite) && !ckx.secret.deck_group_compatible(ckx.group) {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                Error::General("XOF key exchange requires supported component boundaries".into()),
+            ));
+        }
         cx.common.kx_state.complete();
 
         let extensions = Box::new(ServerExtensions {
@@ -602,20 +608,12 @@ mod client_hello {
         // Start key schedule
         let key_schedule_pre_handshake = if let Some(psk) = resuming_psk {
             let early_key_schedule = KeyScheduleEarly::new(suite, psk, binder_kind);
-            // DECK-FORK (draft [zero-rtt]): deck suites defer 0-RTT, so the server
-            // derives no client early-traffic secret / early-data decrypter on
-            // resumption. Resumption is 1-RTT PSK + (EC)DHE; if a client ever
-            // sent early data it is rejected via trial decryption
-            // (emit_encrypted_extensions), which does not use this secret. Non-deck
-            // suites keep RFC 8446 behavior.
-            if !is_deck_suite(suite) {
-                early_key_schedule.client_early_traffic_secret(
-                    &client_hello_hash,
-                    &*config.key_log,
-                    &randoms.client,
-                    cx.common,
-                );
-            }
+            early_key_schedule.client_early_traffic_secret(
+                &client_hello_hash,
+                &*config.key_log,
+                &randoms.client,
+                cx.common,
+            );
 
             KeySchedulePreHandshake::from(early_key_schedule)
         } else {
@@ -702,11 +700,8 @@ mod client_hello {
 
         /* Non-zero max_early_data_size controls whether early_data is allowed at all.
          * We also require stateful resumption. */
-        // DECK-FORK (draft [zero-rtt]): deck suites defer 0-RTT, so a deck server never
-        // accepts early data — it is rejected cleanly (trial decryption skips it),
-        // never reaching the unimplemented deck early-traffic secret.
         let early_data_configured =
-            config.max_early_data_size > 0 && !config.ticketer.enabled() && !is_deck_suite(suite);
+            config.max_early_data_size > 0 && !config.ticketer.enabled();
 
         /* "For PSKs provisioned via NewSessionTicket, a server MUST validate
          *  that the ticket age for the selected PSK identity (computed by

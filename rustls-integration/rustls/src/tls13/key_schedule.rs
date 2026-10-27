@@ -140,7 +140,16 @@ impl KeySchedulePreHandshake {
         mut self,
         shared_secret: SharedSecret,
     ) -> KeyScheduleHandshakeStart {
-        self.ks.input_secret(shared_secret.secret_bytes());
+        if is_deck_suite(self.ks.suite) {
+            if let Some((first, second)) = shared_secret.components() {
+                self.ks.input_secret(first);
+                self.ks.input_secret(second);
+            } else {
+                self.ks.input_secret(shared_secret.secret_bytes());
+            }
+        } else {
+            self.ks.input_secret(shared_secret.secret_bytes());
+        }
         KeyScheduleHandshakeStart { ks: self.ks }
     }
 }
@@ -213,8 +222,15 @@ impl KeyScheduleHandshakeStart {
         client_hello_inner_random: &[u8],
         hs_hash: hash::Output,
     ) -> Result<[u8; 8], Error> {
-        if is_deck_suite(self.ks.suite) {
-            return Err(deck_feature_unsupported("ECH acceptance confirmation"));
+        // DECK-FORK ([ech-generic]): ECH confirmation is keyed only by
+        // ClientHelloInner.random and uses the selected KDF's transcript hash.
+        if let Some(kdf) = deck_kdf(self.ks.suite) {
+            return Ok(deck_schedule::derive::ech_accept_confirmation(
+                kdf,
+                Protocol::Tls13,
+                client_hello_inner_random,
+                hs_hash.as_ref(),
+            ));
         }
         Ok(hkdf_expand_label(
             self.ks
@@ -486,9 +502,14 @@ pub(crate) struct KeyScheduleTrafficWithClientFinishedPending {
 impl KeyScheduleTrafficWithClientFinishedPending {
     pub(crate) fn update_decrypter(&self, common: &mut CommonState) {
         debug_assert_eq!(common.side, Side::Server);
-        self.before_finished
-            .ks
-            .set_decrypter(&self.handshake_client_traffic_secret, common);
+        // DECK-FORK ([record-keys-generic]): the retained schedule has already
+        // entered the application stage, but EndOfEarlyData switches the record
+        // layer to the *handshake* client traffic secret.
+        self.before_finished.ks.inner.set_decrypter_at(
+            &self.handshake_client_traffic_secret,
+            RecordStage::Handshake,
+            common,
+        );
     }
 
     pub(crate) fn sign_client_finish(
@@ -618,11 +639,6 @@ pub(crate) fn deck_kdf(suite: &Tls13CipherSuite) -> Option<Kdf> {
 pub(crate) fn is_deck_suite(suite: &Tls13CipherSuite) -> bool {
     deck_kdf(suite).is_some()
 }
-fn deck_feature_unsupported(feature: &str) -> Error {
-    Error::General(alloc::format!(
-        "{feature} is not implemented for XOF schedules"
-    ))
-}
 #[derive(Clone, Copy)]
 enum RecordStage {
     Early,
@@ -714,12 +730,45 @@ pub fn deck_schedule_selftest(
     }
 }
 #[doc(hidden)]
-pub fn deck_ech_confirmations_fail_cleanly(suite: &'static Tls13CipherSuite) -> bool {
+pub fn deck_ech_confirmations_for_test(
+    suite: &'static Tls13CipherSuite,
+    inner_random: &[u8; 32],
+    server_hash: &[u8],
+    hrr_hash: &[u8],
+) -> Option<([u8; 8], [u8; 8])> {
+    deck_kdf(suite)?;
     let mut hs =
         KeySchedulePreHandshake::new(suite).into_handshake(SharedSecret::from(&[0x42u8; 32][..]));
-    hs.server_ech_confirmation_secret(&[0; 32], hash::Output::new(&[0; 64]))
-        .is_err()
-        && server_ech_hrr_confirmation_secret(suite, &[0; 32], hash::Output::new(&[0; 64])).is_err()
+    let sh = hs
+        .server_ech_confirmation_secret(inner_random, hash::Output::new(server_hash))
+        .ok()?;
+    let hrr = server_ech_hrr_confirmation_secret(
+        suite,
+        inner_random,
+        hash::Output::new(hrr_hash),
+    )
+    .ok()?;
+    Some((sh, hrr))
+}
+
+/// Cross-check that the live hybrid input preserves component boundaries.
+#[doc(hidden)]
+pub fn deck_hybrid_handshake_secrets_for_test(
+    suite: &'static Tls13CipherSuite,
+    first: &[u8],
+    second: &[u8],
+    th_sh: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    deck_kdf(suite)?;
+    let start = KeySchedulePreHandshake::new(suite)
+        .into_handshake(SharedSecret::from_components(first, second));
+    let client = start
+        .ks
+        .derive(SecretKind::ClientHandshakeTrafficSecret, th_sh);
+    let server = start
+        .ks
+        .derive(SecretKind::ServerHandshakeTrafficSecret, th_sh);
+    Some((client.as_ref().to_vec(), server.as_ref().to_vec()))
 }
 
 enum ScheduleState {
@@ -813,6 +862,22 @@ impl KeySchedule {
             return hkdf_expand_label_block(current.as_ref(), kind.to_bytes(), hs_hash);
         }
         let out = match (&self.state, kind) {
+            (
+                ScheduleState::Early { psk, kind: psk_kind },
+                ClientEarlyTrafficSecret,
+            ) => {
+                // DECK-FORK ([key-schedule]): the 0-RTT traffic and exporter
+                // secrets are slices of the same DeriveN output.
+                let early = EarlyStage::new(
+                    deck_kdf(self.suite).unwrap(),
+                    Protocol::Tls13,
+                    Some((psk.as_slice(), *psk_kind)),
+                )
+                .expect("validated PSK");
+                let (traffic, _exporter) =
+                    early.early_traffic(hs_hash).expect("bounded transcript");
+                traffic
+            }
             (
                 ScheduleState::Handshake(h),
                 ClientHandshakeTrafficSecret | ServerHandshakeTrafficSecret,
@@ -911,13 +976,25 @@ impl KeyScheduleSuite {
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
+        self.set_decrypter_at(secret, self.stage, common);
+    }
+
+    fn set_decrypter_at(&self, secret: &OkmBlock, stage: RecordStage, common: &mut CommonState) {
         common
             .record_layer
-            .set_message_decrypter(self.derive_decrypter(secret));
+            .set_message_decrypter(self.derive_decrypter_at(secret, stage));
     }
 
     fn derive_decrypter(&self, secret: &OkmBlock) -> Box<dyn MessageDecrypter> {
-        let (key, iv) = deck_record_keys(self.suite, secret.as_ref(), self.stage);
+        self.derive_decrypter_at(secret, self.stage)
+    }
+
+    fn derive_decrypter_at(
+        &self,
+        secret: &OkmBlock,
+        stage: RecordStage,
+    ) -> Box<dyn MessageDecrypter> {
+        let (key, iv) = deck_record_keys(self.suite, secret.as_ref(), stage);
         self.suite.aead_alg.decrypter(key, iv)
     }
 
@@ -1105,8 +1182,14 @@ pub(crate) fn server_ech_hrr_confirmation_secret(
     client_hello_inner_random: &[u8],
     hs_hash: hash::Output,
 ) -> Result<[u8; 8], Error> {
-    if is_deck_suite(suite) {
-        return Err(deck_feature_unsupported("HRR ECH acceptance confirmation"));
+    // DECK-FORK ([ech-generic]): HRR has its own label and confirmation transcript.
+    if let Some(kdf) = deck_kdf(suite) {
+        return Ok(deck_schedule::derive::hrr_ech_accept_confirmation(
+            kdf,
+            Protocol::Tls13,
+            client_hello_inner_random,
+            hs_hash.as_ref(),
+        ));
     }
     Ok(hkdf_expand_label(
         suite

@@ -584,7 +584,8 @@ pub use crate::tls13::Tls13CipherSuite;
 // `deck-schedule` reference (the `key_schedule` module itself is `pub(crate)`).
 #[doc(hidden)]
 pub use crate::tls13::key_schedule::{
-    deck_ech_confirmations_fail_cleanly, deck_schedule_selftest, DeckScheduleSelftest,
+    deck_ech_confirmations_for_test, deck_hybrid_handshake_secrets_for_test,
+    deck_schedule_selftest, DeckScheduleSelftest,
 };
 pub use crate::verify::DigitallySignedStruct;
 pub use crate::versions::{ALL_VERSIONS, DEFAULT_VERSIONS, SupportedProtocolVersion};

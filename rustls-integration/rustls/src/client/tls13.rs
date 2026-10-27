@@ -137,15 +137,17 @@ pub(super) fn handle_server_hello(
                         });
                     };
 
-                    // If the server varies the suite here, we will have encrypted early data with
-                    // the wrong suite.
-                    if cx.data.early_data.is_enabled() && resuming_suite != suite {
-                        return Err({
-                            cx.common.send_fatal_alert(
-                                AlertDescription::IllegalParameter,
-                                PeerMisbehaved::EarlyDataOfferedWithVariedCipherSuite,
-                            )
-                        });
+                    // Preserve rustls's ServerHello-time exact-suite check
+                    // for ordinary HKDF. XOF permits an AEAD change when
+                    // early data is rejected in EncryptedExtensions.
+                    if !is_deck_suite(suite)
+                        && cx.data.early_data.is_enabled()
+                        && resuming_suite != suite
+                    {
+                        return Err(cx.common.send_fatal_alert(
+                            AlertDescription::IllegalParameter,
+                            PeerMisbehaved::EarlyDataOfferedWithVariedCipherSuite,
+                        ));
                     }
 
                     if selected_psk != 0 {
@@ -197,11 +199,6 @@ pub(super) fn handle_server_hello(
         }
     };
 
-    if is_deck_suite(suite) && matches!(their_key_share.group,
-        crate::NamedGroup::X25519MLKEM768|crate::NamedGroup::secp256r1MLKEM768) {
-        return Err(cx.common.send_fatal_alert(AlertDescription::HandshakeFailure,
-            Error::General("XOF hybrid component extraction is not implemented".into())));
-    }
     cx.common.kx_state.complete();
     let shared_secret = our_key_share
         .complete(&their_key_share.payload.0)
@@ -209,6 +206,12 @@ pub(super) fn handle_server_hello(
             cx.common
                 .send_fatal_alert(AlertDescription::IllegalParameter, err)
         })?;
+    if is_deck_suite(suite) && !shared_secret.deck_group_compatible(their_key_share.group) {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            Error::General("XOF key exchange requires supported component boundaries".into()),
+        ));
+    }
 
     let mut key_schedule = key_schedule_pre_handshake.into_handshake(shared_secret);
 
@@ -246,6 +249,18 @@ pub(super) fn handle_server_hello(
             // The server rejected our ECH offer.
             None => EchStatus::Rejected,
         };
+        if cx.data.ech_status == EchStatus::Accepted
+            && !config.provider.cipher_suites.iter().any(|configured| {
+                configured.suite() == suite.common.suite
+                    && configured.hash_provider().schedule_profile()
+                        == suite.common.hash_provider.schedule_profile()
+            })
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                Error::General("required schedule not negotiated inside ECH".into()),
+            ));
+        }
     }
 
     // Remember what KX group the server liked for next time.
@@ -422,13 +437,9 @@ pub(super) fn prepare_resumption(
     // The EarlyData extension MUST be supplied together with the
     // PreSharedKey extension.
     let max_early_data_size = resuming_session.max_early_data_size();
-    // DECK-FORK (draft [zero-rtt]): deck suites defer 0-RTT, so a deck client never
-    // offers early data — it resumes at 1-RTT, never reaching the unimplemented
-    // deck early-traffic secret.
     if config.enable_early_data
         && max_early_data_size > 0
         && !doing_retry
-        && !is_deck_suite(resuming_suite)
     {
         cx.data
             .early_data
@@ -608,7 +619,17 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 let was_early_traffic = cx.common.early_traffic;
                 if was_early_traffic {
                     match exts.early_data_ack {
-                        Some(()) => cx.data.early_data.accepted(),
+                        Some(()) => {
+                            // DECK-FORK ([zero-rtt]): a changed AEAD can still
+                            // resume at 1-RTT, but cannot accept the early data.
+                            if resuming_session.suite().common.suite != self.suite.common.suite {
+                                return Err(cx.common.send_fatal_alert(
+                                    AlertDescription::IllegalParameter,
+                                    PeerMisbehaved::EarlyDataOfferedWithVariedCipherSuite,
+                                ));
+                            }
+                            cx.data.early_data.accepted();
+                        }
                         None => {
                             cx.data.early_data.rejected();
                             cx.common.early_traffic = false;

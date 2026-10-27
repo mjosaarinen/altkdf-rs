@@ -1,7 +1,7 @@
 # rustls-integration
 
-The vendored rustls 0.23.41 fork implements the combined
-[draft-sullivan-tls-xof-schedule](https://github.com/grittygrease/draft-sullivan-tls-xof-schedule-collab/blob/9f5554a7fe4d61db15f2bc467ab69fa6754ec638/draft-sullivan-tls-xof-schedule.md).
+The vendored rustls 0.23.41 fork implements
+[draft-sullivan-tls-xof-schedule](https://github.com/grittygrease/draft-sullivan-tls-xof-schedule-collab/blob/c6c02fbc45e5febbbc958068b4599e06f01f1dc0/draft-sullivan-tls-xof-schedule.md).
 Local fork changes are marked `DECK-FORK`.
 
 ## Negotiation
@@ -18,12 +18,13 @@ HRR pinning before selecting the transcript provider. Providers containing only
 virtual suites require an XOF; adding ordinary suites permits HKDF fallback.
 
 Use `deck_provider()` for composition, or `deck_server_config()` and
-`deck_client_config()` for TLS 1.3, 1-RTT resumption on, and early data off.
+`deck_client_config()` for TLS 1.3, 1-RTT resumption on, and early data off by
+default. Set the rustls early-data configuration fields to opt in to 0-RTT.
 `negotiated_schedule_profile()` returns the KDF Identifier, or None for HKDF.
 
 ## Schedule And PSKs
 
-The fork's state variants carry the core crate's early, handshake
+The fork's state variants carry the independently implemented early, handshake
 and application stages. Contexts belong to leaves; stage ratchets bind no
 transcript. The PSK path uses the residue jointly derived with its ebk/ibk/rbk
 binder key, not the no-PSK ratchet.
@@ -35,7 +36,6 @@ count example measures the minimal draft graph, not this live call count.
 Session tickets retain the KDF Identifier in the private server session encoding,
 and client sessions retain their virtual suite. A ticket may resume under a
 different AEAD with the same KDF; a KDF mismatch causes a full handshake.
-Without an XOF KDF, the server retains upstream's exact-suite resumption policy.
 The new encoding intentionally does not accept old experimental tickets.
 
 `DeckExternalPsk` imports a provisioned EPSK under RFC 9258 ImportedIdentity,
@@ -43,22 +43,27 @@ per target KDF, and uses the imported ibk binder. The public fields remain
 `ClientConfig.deck_external_psk` and `ServerConfig.deck_external_psks`.
 This surface supports imported external PSKs with DHE; raw external PSKs and
 PSK-only handshakes have core/vector coverage, not live configuration.
-The client offers one imported identity for its first XOF KDF. After HRR it
-retains or removes that identity; it cannot introduce an import for another KDF.
 
 ## Coverage
 
-Tests cover every supported AEAD/KDF pair, ML-KEM768, transcript/schedule
-cross-checking, full and resumed handshakes, imported external PSKs (including
+Tests cover every supported AEAD/KDF pair, ML-KEM768, both hybrid groups,
+accepted 0-RTT, transcript/schedule cross-checking, full and resumed handshakes,
+imported external PSKs (including
 HRR and AEAD changes), wrong binders, required-KDF and fallback policy,
 unoffered/unsolicited selections, and HRR pinning. The demo adds TCP, KeyUpdate,
 exporter agreement, and NSS secret-log agreement.
 
-0-RTT is declined for XOF schedules. XOF+ECH is rejected cleanly because the
-draft's inner/outer rules need clarification; ordinary HKDF ECH remains on its
-upstream derivation. QUIC has no defined XOF mapping. The default groups are
-single-component ML-KEM768, X25519 and secp256r1; known hybrids are excluded on
-the XOF path until component extraction is available.
+The client can offer XOF+ECH and computes
+the ServerHello and HRR acceptance confirmations with the selected KDF. An
+ordinary server's ECH rejection is tested under XOF and ordinary HKDF outer
+handshakes; accepted ECH still needs an external server interoperability test.
+Imported external PSKs with ECH fail before ClientHello until their binder can
+be computed over ClientHelloInner. The fork has no ECH server.
+Ordinary HKDF ECH retains its upstream derivation. QUIC has no defined XOF
+mapping. The default groups are ML-KEM768, X25519MLKEM768,
+secp256r1MLKEM768, X25519, and secp256r1. Hybrid XOF handshakes absorb their
+component secrets separately in the group's specified order. XOF rejects an
+unknown key exchange group or a known hybrid without component metadata.
 
 The workspace excludes the vendor from its formatting/lint file set.
 `make ci` builds it as a dependency and tests the integration behavior.

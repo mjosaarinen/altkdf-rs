@@ -71,3 +71,7 @@ help: ## Show this help
 	@echo "Targets:"
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / \
 		{printf "  \033[36m%-11s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+# Private-only targets (spec rendering, fixture extraction, public sync).
+# Absent in the public mirror; see .publicignore.
+-include Makefile.private

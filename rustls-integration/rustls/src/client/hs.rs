@@ -175,6 +175,11 @@ impl ClientHelloInput {
             }
             _ => None,
         };
+        if ech_state.is_some() && self.config.deck_external_psk.is_some() {
+            return Err(Error::General(
+                "imported external PSKs with ECH are not supported".into(),
+            ));
+        }
 
         emit_client_hello_for_retry(
             transcript_buffer,
@@ -244,9 +249,6 @@ fn emit_client_hello_for_retry(
     let profiles=crate::schedule_profile::profiles(&config.provider);
     if supported_versions.tls13 && !profiles.is_empty() && !cx.common.is_quic() {
         exts.schedule_profiles=Some(crate::msgs::handshake::ScheduleProfileList(profiles));
-    }
-    if ech_state.is_some() && exts.schedule_profiles.is_some() {
-        return Err(Error::General("XOF schedule with ECH is not supported by this prototype".into()));
     }
 
     match extra_exts.transport_parameters.clone() {
@@ -371,8 +373,11 @@ fn emit_client_hello_for_retry(
     let tls13_session = prepare_resumption(&input.resuming, &mut exts, suite, cx, config);
 
     // DECK-FORK ([psk-importer]): after HRR only reuse an identity offered in CH1.
+    // Imported PSK + ECH is refused before the first ClientHello; resumption
+    // has its own ClientHelloInner binder path below.
     let deck_external_psk = match tls13_session {
         Some(_) => None,
+        None if ech_state.is_some() => None,
         None => prepare_deck_external_psk(
             config,
             &mut exts,
@@ -881,6 +886,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
             server_hello.cipher_suite,
             server_hello.schedule_profile,
             self.input.hello.sent_extensions.contains(&ExtensionType::ScheduleProfile),
+            self.ech_state.is_some(),
             cx.common,
         )?;
 
@@ -1047,6 +1053,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
             hrr.cipher_suite,
             hrr.schedule_profile,
             self.next.input.hello.sent_extensions.contains(&ExtensionType::ScheduleProfile),
+            self.next.ech_state.is_some(),
             cx.common,
         )?;
 
@@ -1079,6 +1086,18 @@ impl ExpectServerHelloOrHelloRetryRequest {
             }
             _ => {}
         };
+        if cx.data.ech_status == EchStatus::Accepted
+            && !config.provider.cipher_suites.iter().any(|configured| {
+                configured.suite() == cs.suite()
+                    && configured.hash_provider().schedule_profile()
+                        == cs.hash_provider().schedule_profile()
+            })
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                Error::General("required schedule not negotiated inside ECH".into()),
+            ));
+        }
 
         // This is the draft19 change where the transcript became a tree
         let transcript = self

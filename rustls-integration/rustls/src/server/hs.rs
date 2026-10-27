@@ -576,9 +576,7 @@ impl ExpectClientHello {
                 .kx_groups
                 .iter()
                 .find(|skxg| {
-                    // DECK-FORK ([key-schedule]): backend flattens hybrid secrets.
-                    let hybrid=matches!(skxg.name(),NamedGroup::X25519MLKEM768|NamedGroup::secp256r1MLKEM768);
-                    !(selected_profile.is_some() && hybrid) && skxg.usable_for_version(selected_version) && skxg.name() == *offered_group
+                    skxg.usable_for_version(selected_version) && skxg.name() == *offered_group
                 });
 
             match offered_group.key_exchange_algorithm() {

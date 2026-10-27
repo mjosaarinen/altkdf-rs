@@ -26,6 +26,7 @@ pub(crate) fn choose_client(
     code: CipherSuite,
     profile: Option<u16>,
     extension_sent: bool,
+    ech_offered: bool,
     common: &mut CommonState,
 ) -> Result<SupportedCipherSuite, Error> {
     let offered = profiles(provider);
@@ -43,15 +44,37 @@ pub(crate) fn choose_client(
             ));
         }
     }
-    provider
+    let configured = provider
         .cipher_suites
         .iter()
         .find(|s| s.suite() == code && s.hash_provider().schedule_profile() == profile)
-        .copied()
-        .ok_or_else(|| {
-            common.send_fatal_alert(
-                AlertDescription::HandshakeFailure,
-                Error::General("required schedule or cipher suite not negotiated".into()),
-            )
-        })
+        .copied();
+    // DECK-FORK ([cipher-suites]): an ECH rejection may complete an outer
+    // handshake under ordinary TLS 1.3 even when the inner handshake requires
+    // XOF. The same AEAD code point was offered by the virtual XOF suite.
+    #[cfg(feature = "aws_lc_rs")]
+    let outer_hkdf = if configured.is_none() && ech_offered && profile.is_none() {
+        crate::crypto::aws_lc_rs::default_provider()
+            .cipher_suites
+            .iter()
+            .find(|s| {
+                s.suite() == code
+                    && s.version().version == crate::ProtocolVersion::TLSv1_3
+                    && provider
+                        .cipher_suites
+                        .iter()
+                        .any(|offered| offered.suite() == code)
+            })
+            .copied()
+    } else {
+        None
+    };
+    #[cfg(not(feature = "aws_lc_rs"))]
+    let outer_hkdf = None;
+    configured.or(outer_hkdf).ok_or_else(|| {
+        common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            Error::General("required schedule or cipher suite not negotiated".into()),
+        )
+    })
 }

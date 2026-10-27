@@ -409,6 +409,36 @@ fn resumption_can_change_aead_but_not_kdf() {
 }
 
 #[test]
+fn deck_early_data_is_rejected_when_aead_changes() {
+    for k in [0x100, 0x101] {
+        let mut cc = client(provider(&[k], false));
+        cc.enable_early_data = true;
+        let cc = Arc::new(cc);
+        let mut first = server(only_aead(provider(&[k], false), 0x1301));
+        first.max_early_data_size = 1024;
+        let mut second = server(only_aead(provider(&[k], false), 0x1303));
+        second.session_storage = first.session_storage.clone();
+        second.max_early_data_size = 1024;
+
+        let (mut c, mut s) = connections(cc.clone(), Arc::new(first));
+        finish(&mut c, &mut s).unwrap();
+        assert!(c.tls13_tickets_received() > 0);
+
+        let (mut c, mut s) = connections(cc, Arc::new(second));
+        c.early_data().unwrap().write_all(b"early data").unwrap();
+        finish(&mut c, &mut s).unwrap();
+        assert_eq!(c.handshake_kind(), Some(HandshakeKind::Resumed));
+        assert!(!c.is_early_data_accepted());
+        assert_eq!(c.negotiated_schedule_profile(), Some(k));
+        assert_eq!(
+            u16::from(c.negotiated_cipher_suite().unwrap().suite()),
+            0x1303
+        );
+        exchange(&mut c, &mut s);
+    }
+}
+
+#[test]
 fn hkdf_resumption_keeps_upstream_exact_suite_policy() {
     for early_data in [false, true] {
         let mut cc = client(provider(&[], true));

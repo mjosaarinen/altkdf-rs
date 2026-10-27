@@ -1,6 +1,6 @@
 #![no_std]
-//! Prototype of `draft-sullivan-tls-xof-schedule`, combined PRs
-//! #2 and #3. KDF negotiation is independent of the TLS 1.3 AEAD cipher suite.
+//! Prototype of `draft-sullivan-tls-xof-schedule`. KDF negotiation is
+//! independent of the TLS 1.3 AEAD cipher suite.
 //!
 //! The `no_std` + `alloc` core implements the framed deck interface, both XOFs,
 //! the three-stage schedule, retained-secret derivations, and RFC 9258 import.

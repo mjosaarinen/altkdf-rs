@@ -5,11 +5,9 @@ The TLS 1.3 cipher suite selects the AEAD; a separate `schedule_profile`
 extension selects SHAKE256 or TurboSHAKE256 for the transcript hash and key
 schedule, including Finished and PSK binders.
 
-This version tracks the combined
-[PR #2](https://github.com/grittygrease/draft-sullivan-tls-xof-schedule-collab/pull/2)
-and [PR #3](https://github.com/grittygrease/draft-sullivan-tls-xof-schedule-collab/pull/3)
-specification at
-[`9f5554a`](https://github.com/grittygrease/draft-sullivan-tls-xof-schedule-collab/blob/9f5554a7fe4d61db15f2bc467ab69fa6754ec638/draft-sullivan-tls-xof-schedule.md).
+This version tracks the collaborative repository's `main` at
+[`c6c02fb`](https://github.com/grittygrease/draft-sullivan-tls-xof-schedule-collab/blob/c6c02fbc45e5febbbc958068b4599e06f01f1dc0/draft-sullivan-tls-xof-schedule.md),
+which includes PRs #2 through #15.
 DeckTLS is this implementation's prototype name, not a protocol name.
 The earlier `xof-ciphers-00` design and its `0xFF01..05` suites are obsolete.
 
@@ -32,11 +30,13 @@ derivations, DTLS record-number keys and Exported Authenticator fixtures.
 
 The fork negotiates the KDF in ClientHello, ServerHello and HelloRetryRequest.
 Both KDFs work with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 over
-single-component ML-KEM768, X25519 or secp256r1. Tests cover all six AEAD/KDF
-pairs, HRR, 1-RTT resumption, imported external PSKs, KeyUpdate and exporters.
+ML-KEM768, X25519, secp256r1 and the hybrid groups X25519MLKEM768 and
+SecP256r1MLKEM768. Hybrid component secrets are absorbed separately, in the
+group's concatenation order. Tests cover all six AEAD/KDF pairs, HRR, 1-RTT
+resumption, accepted 0-RTT, imported external PSKs, KeyUpdate and exporters.
 XOF PSKs bind a KDF rather than an AEAD, so 1-RTT resumption may change AEAD
-under the same KDF. Ordinary HKDF server resumption retains upstream's
-exact-suite policy.
+under the same KDF; early data is then rejected, as the draft requires.
+Ordinary HKDF resumption retains upstream's exact-suite policy.
 
 Experimental identifiers are extension **0xffa6** and KDFs **0x0100/0x0101**.
 They are local interoperability conventions, not IANA assignments.
@@ -81,16 +81,20 @@ schedule. See [the demo README](tls-demo/README.md).
 
 ## Scope And Limits
 
-- Config helpers require an XOF KDF, enable 1-RTT resumption and disable 0-RTT.
+- Config helpers require an XOF KDF and enable 1-RTT resumption. Early data is
+  off by default; opt in through `ClientConfig.enable_early_data` and
+  `ServerConfig.max_early_data_size`.
 - Imported external PSKs support DHE handshakes. The client offers one identity
   for its first XOF KDF; HRR can retain or remove it, never replace it.
 - DTLS, Exported Authenticators, raw external PSKs and PSK-only handshakes have
   core/vector coverage, not live stack integration.
-- XOF 0-RTT is declined. The dormant early-data record-key path needs further
-  work before it can be enabled.
-- XOF+ECH is rejected cleanly pending inner/outer KDF negotiation rules.
-- QUIC has no XOF mapping. Known hybrid groups are declined until ordered
-  shared-secret component extraction is available.
+- The client can offer XOF KDFs with ECH and checks both acceptance
+  confirmations under the KDF the server selects. An ordinary server's
+  rejection completes the outer handshake. There is no ECH server here, so
+  accepted ECH has not been tested live. Imported external PSKs with ECH are
+  refused before ClientHello.
+- QUIC has no XOF mapping. Unknown key-exchange groups, and known hybrids
+  without component boundaries, are refused under an XOF KDF.
 - Mixed XOF/HKDF providers support fallback, but selection can fail if the
   chosen KDF has no usable AEAD. The default XOF provider avoids this case.
 - Some low-level helpers panic on out-of-range caller-supplied lengths.

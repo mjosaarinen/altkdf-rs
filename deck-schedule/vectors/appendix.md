@@ -2,7 +2,7 @@
 
 Extracted without changing names or bytes from the Test Vectors appendix of
 `draft-sullivan-tls-xof-schedule`, revision
-`9f5554a7fe4d61db15f2bc467ab69fa6754ec638`.
+`c6c02fbc45e5febbbc958068b4599e06f01f1dc0`.
 See `README.md` for provenance and `../NOTICE.md` for attribution.
 
 ## TLS13_SHAKE256 Vectors

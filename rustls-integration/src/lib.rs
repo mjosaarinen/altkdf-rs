@@ -3,8 +3,11 @@
 //! Internal virtual suites reuse standard AEAD code points and negotiate the
 //! KDF in `schedule_profile` (`[cipher-suites]`). The explicit hash metadata,
 //! not the SHA512 output-size tag, selects the XOF and PSK compatibility.
-//! The helpers require an XOF schedule, enable 1-RTT resumption, and decline
-//! 0-RTT. ECH, QUIC and live hybrid groups are outside this prototype's scope.
+//! The helpers require an XOF schedule and enable 1-RTT resumption. They leave
+//! 0-RTT disabled by default; applications can opt in through rustls config.
+//! The ECH client can offer XOF profiles and compute acceptance confirmations;
+//! accepted ECH awaits interoperability testing. QUIC is outside this
+//! prototype's scope.
 
 pub mod hash;
 pub mod suites;
@@ -35,8 +38,7 @@ pub fn deck_server_config(
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
             .with_single_cert(cert_chain, key_der)?;
-    // 1-RTT resumption stays on (rustls default tickets). 0-RTT is deferred
-    // (draft [zero-rtt]): no early data is ever accepted.
+    // Keep early data opt-in. Applications can set this after construction.
     config.max_early_data_size = 0;
     Ok(config)
 }
@@ -52,8 +54,7 @@ pub fn deck_client_config(
             .dangerous()
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
-    // 1-RTT resumption stays on (rustls default store). 0-RTT is deferred
-    // (draft [zero-rtt]): the client offers no early data.
+    // Keep early data opt-in. Applications can set this after construction.
     config.enable_early_data = false;
     config
 }
@@ -142,11 +143,19 @@ pub fn aws_lc_rs_provider() -> rustls::crypto::CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
 }
 
-/// Single-component key exchanges: pure ML-KEM768, X25519 and secp256r1.
-/// Hybrids need ordered component extraction that the backend does not expose.
-pub fn deck_kx_groups() -> [&'static dyn rustls::crypto::SupportedKxGroup; 3] {
-    use rustls::crypto::aws_lc_rs::kx_group::{MLKEM768, SECP256R1, X25519};
-    [MLKEM768, X25519, SECP256R1]
+/// Supported key exchanges. Pure ML-KEM768 remains first for the loopback demo;
+/// hybrid groups retain their component boundaries for the XOF schedule.
+pub fn deck_kx_groups() -> [&'static dyn rustls::crypto::SupportedKxGroup; 5] {
+    use rustls::crypto::aws_lc_rs::kx_group::{
+        MLKEM768, SECP256R1, SECP256R1MLKEM768, X25519, X25519MLKEM768,
+    };
+    [
+        MLKEM768,
+        X25519MLKEM768,
+        SECP256R1MLKEM768,
+        X25519,
+        SECP256R1,
+    ]
 }
 
 #[cfg(test)]
@@ -176,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn deck_kx_groups_exclude_hybrids() {
+    fn deck_kx_groups_include_hybrids() {
         use rustls::crypto::aws_lc_rs::kx_group;
         let names: Vec<_> = super::deck_kx_groups().iter().map(|g| g.name()).collect();
 
@@ -187,13 +196,45 @@ mod tests {
         assert!(names.contains(&kx_group::X25519.name()));
         assert!(names.contains(&kx_group::SECP256R1.name()));
         assert!(
-            !names.contains(&kx_group::X25519MLKEM768.name()),
-            "hybrid X25519MLKEM768 must be excluded"
+            names.contains(&kx_group::X25519MLKEM768.name()),
+            "hybrid X25519MLKEM768 is supported"
         );
         assert!(
-            !names.contains(&kx_group::SECP256R1MLKEM768.name()),
-            "hybrid SECP256R1MLKEM768 must be excluded"
+            names.contains(&kx_group::SECP256R1MLKEM768.name()),
+            "hybrid SECP256R1MLKEM768 is supported"
         );
+    }
+
+    #[test]
+    fn live_hybrid_stage_absorbs_components_separately() {
+        for (index, kdf) in [
+            (0, deck_schedule::TURBOSHAKE256),
+            (3, deck_schedule::SHAKE256),
+        ] {
+            let suite = crate::suites::deck_cipher_suites()[index].tls13().unwrap();
+            let first = b"component one";
+            let second = b"component two";
+            let th_sh = [0x7au8; 64];
+            let live = rustls::deck_hybrid_handshake_secrets_for_test(suite, first, second, &th_sh)
+                .unwrap();
+            let mut h =
+                deck_schedule::schedule::EarlyStage::new(kdf, deck_schedule::Protocol::Tls13, None)
+                    .unwrap()
+                    .into_handshake();
+            h.absorb(first).unwrap();
+            h.absorb(second).unwrap();
+            let (client, server) = h.traffic(&th_sh).unwrap();
+            assert_eq!(live, (client.to_vec(), server.to_vec()));
+
+            let mut flattened =
+                deck_schedule::schedule::EarlyStage::new(kdf, deck_schedule::Protocol::Tls13, None)
+                    .unwrap()
+                    .into_handshake();
+            flattened
+                .absorb(&[first.as_slice(), second.as_slice()].concat())
+                .unwrap();
+            assert_ne!(live.0, flattened.traffic(&th_sh).unwrap().0.to_vec());
+        }
     }
 
     fn deck_suite(code: u16, hash: &'static DeckHash) -> &'static Tls13CipherSuite {

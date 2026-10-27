@@ -23,6 +23,7 @@ Thumbs.db
 
 # ---- Scratch / logs ----
 /scratch/
+/priv/
 *.tmp
 *.log
 
@@ -35,6 +36,3 @@ __pycache__/
 sslkeylog*.txt
 *.pcap
 *.pcapng
-
-# ---- Reference documents ----
-/doc/

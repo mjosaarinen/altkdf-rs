@@ -613,6 +613,9 @@ pub struct CompletedKeyExchange {
 pub struct SharedSecret {
     buf: Vec<u8>,
     offset: usize,
+    // DECK-FORK ([key-schedule]): a hybrid group must preserve the boundary
+    // between its two component secrets for separate Absorb calls.
+    first_component_len: Option<usize>,
 }
 
 impl SharedSecret {
@@ -621,10 +624,45 @@ impl SharedSecret {
         &self.buf[self.offset..]
     }
 
+    pub(crate) fn from_components(first: &[u8], second: &[u8]) -> Self {
+        let mut buf = Vec::with_capacity(first.len() + second.len());
+        buf.extend_from_slice(first);
+        buf.extend_from_slice(second);
+        Self {
+            buf,
+            offset: 0,
+            first_component_len: Some(first.len()),
+        }
+    }
+
+    pub(crate) fn components(&self) -> Option<(&[u8], &[u8])> {
+        self.first_component_len
+            .map(|len| {
+                let len = len
+                    .checked_sub(self.offset)
+                    .expect("hybrid component boundary precedes secret offset");
+                self.secret_bytes().split_at(len)
+            })
+    }
+
+    pub(crate) fn deck_group_compatible(&self, group: NamedGroup) -> bool {
+        match group {
+            NamedGroup::X25519MLKEM768 | NamedGroup::secp256r1MLKEM768 => {
+                self.first_component_len.is_some()
+            }
+            NamedGroup::Unknown(_) => false,
+            _ => self.first_component_len.is_none(),
+        }
+    }
+
     /// Removes leading zeros from `secret_bytes()` by adjusting the `offset`.
     ///
     /// This function does not re-allocate.
     fn strip_leading_zeros(&mut self) {
+        assert!(
+            self.first_component_len.is_none(),
+            "cannot strip leading zeros from a hybrid shared secret"
+        );
         let start = self
             .secret_bytes()
             .iter()
@@ -647,13 +685,18 @@ impl From<&[u8]> for SharedSecret {
         Self {
             buf: source.to_vec(),
             offset: 0,
+            first_component_len: None,
         }
     }
 }
 
 impl From<Vec<u8>> for SharedSecret {
     fn from(buf: Vec<u8>) -> Self {
-        Self { buf, offset: 0 }
+        Self {
+            buf,
+            offset: 0,
+            first_component_len: None,
+        }
     }
 }
 
@@ -757,4 +800,5 @@ mod tests {
             assert_eq!(secret.secret_bytes(), expected);
         }
     }
+
 }

@@ -657,8 +657,7 @@ impl EchState {
             let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(inner_hello));
 
             // Retain the early key schedule we get from processing the binder.
-            // (ECH resumption uses the resumption PSK + "res binder"; deck ECH is
-            // itself unsupported and fails closed, draft §5.8.)
+            // ECH resumption uses the inner transcript and the resumption PSK.
             self.early_data_key_schedule = Some(tls13::fill_in_psk_binder(
                 resuming.suite(),
                 resuming.secret(),

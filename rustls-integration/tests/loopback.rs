@@ -205,6 +205,35 @@ fn loopback_each_deck_suite() {
     }
 }
 
+/// Both backend hybrid groups complete XOF handshakes. Their component
+/// boundaries are retained when the shared secret enters the schedule.
+#[test]
+fn loopback_hybrid_groups_under_both_kdfs() {
+    use rustls::crypto::aws_lc_rs::kx_group::{SECP256R1MLKEM768, X25519MLKEM768};
+    for group in [X25519MLKEM768, SECP256R1MLKEM768] {
+        for suite_index in [0, 3] {
+            let suite = deck_provider().cipher_suites[suite_index];
+            let mut client_provider = provider_with(vec![suite]);
+            client_provider.kx_groups = vec![group];
+            let mut server_provider = provider_with(vec![suite]);
+            server_provider.kx_groups = vec![group];
+            let (mut client, mut server) = handshake_only(
+                client_config_on(client_provider),
+                server_config_on(server_provider),
+            );
+            assert_eq!(
+                client.negotiated_key_exchange_group().map(|g| g.name()),
+                Some(group.name()),
+            );
+            client.writer().write_all(b"hybrid XOF").unwrap();
+            pump!(client => server);
+            let mut received = [0u8; 10];
+            server.reader().read_exact(&mut received).unwrap();
+            assert_eq!(&received, b"hybrid XOF");
+        }
+    }
+}
+
 /// The deployment helpers default to **1-RTT resumption on, 0-RTT off**.
 /// Field-level policy check plus a behavioral one: a live handshake through
 /// the helpers issues a NewSessionTicket. The full offer-and-resume flow is

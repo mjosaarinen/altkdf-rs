@@ -49,14 +49,12 @@ impl SupportedKxGroup for Hybrid {
         let combined_pub_key = self
             .layout
             .concat(&pq.pub_key, &cl.pub_key);
-        let secret = self
-            .layout
-            .concat(pq.secret.secret_bytes(), cl.secret.secret_bytes());
+        let secret = self.layout.secret(pq.secret.secret_bytes(), cl.secret.secret_bytes());
 
         Ok(CompletedKeyExchange {
             group: self.name,
             pub_key: combined_pub_key,
-            secret: SharedSecret::from(secret),
+            secret,
         })
     }
 
@@ -116,10 +114,7 @@ impl ActiveKeyExchange for ActiveHybrid {
             .post_quantum
             .complete(post_quantum_share)?;
 
-        let secret = self
-            .layout
-            .concat(pq.secret_bytes(), cl.secret_bytes());
-        Ok(SharedSecret::from(secret))
+        Ok(self.layout.secret(pq.secret_bytes(), cl.secret_bytes()))
     }
 
     /// Allow the classical computation to be offered and selected separately.
@@ -200,6 +195,13 @@ impl Layout {
         match self.post_quantum_first {
             true => [post_quantum, classical].concat(),
             false => [classical, post_quantum].concat(),
+        }
+    }
+
+    fn secret(&self, post_quantum: &[u8], classical: &[u8]) -> SharedSecret {
+        match self.post_quantum_first {
+            true => SharedSecret::from_components(post_quantum, classical),
+            false => SharedSecret::from_components(classical, post_quantum),
         }
     }
 }
